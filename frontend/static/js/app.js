@@ -82,9 +82,9 @@ async function loadHealth() {
       const s = data.summary;
       document.getElementById('panel-health').style.display = 'block';
       document.getElementById('health-grid').innerHTML = `
-        <div class="health-card"><div class="hc-val">${s.totalVS}</div><div class="hc-label">Total VS</div></div>
-        <div class="health-card hc-up"><div class="hc-val">${s.vsUp}</div><div class="hc-label">VS Up</div></div>
-        <div class="health-card hc-down"><div class="hc-val">${s.vsDown}</div><div class="hc-label">VS Down</div></div>
+        <div class="health-card"><div class="hc-val">${s.totalVS}</div><div class="hc-label">Total Virtual Server</div></div>
+        <div class="health-card hc-up"><div class="hc-val">${s.vsUp}</div><div class="hc-label">Virtual Server Up</div></div>
+        <div class="health-card hc-down"><div class="hc-val">${s.vsDown}</div><div class="hc-label">Virtual Server Down</div></div>
         <div class="health-card"><div class="hc-val">${s.totalPools}</div><div class="hc-label">Pools</div></div>
       `;
     }
@@ -112,7 +112,7 @@ async function doSearch() {
   if (!config.host || !config.password) { toast('Hubungkan ke F5 dulu', 'err'); return; }
   cfg = config;
   closePopup();
-  setStatus(q ? `Mencari "${q}"...` : 'Memuat semua VS...');
+  setStatus(q ? `Mencari "${q}"...` : 'Memuat semua Virtual Server...');
   clearTree();
 
   if (activeSearchController) activeSearchController.abort();
@@ -134,7 +134,7 @@ async function doSearch() {
     }
     const data = await r.json();
     if (!data.vsList || data.vsList.length === 0) {
-      setStatus(q ? `Tidak ditemukan hasil untuk "${q}"` : 'Tidak ada VS yang ditemukan', 'err');
+      setStatus(q ? `Tidak ditemukan hasil untuk "${q}"` : 'Tidak ada Virtual Server yang ditemukan', 'err');
       return;
     }
     renderTree(data);
@@ -148,7 +148,7 @@ async function doSearch() {
     const pools   = data.vsList.reduce((a, v) => a + v.pools.length, 0);
     const members = data.vsList.reduce((a, v) => a + v.pools.reduce((b, p) => b + p.members.length, 0), 0);
     const elapsed = data.elapsed ? ` · ${data.elapsed}s` : '';
-    setStatus(`${total} VS · ${pools} pool · ${members} member${elapsed}`, 'ok');
+    setStatus(`${total} Virtual Server · ${pools} pool · ${members} member${elapsed}`, 'ok');
   } catch (e) {
     if (e.name === 'AbortError') {
       setStatus('Pencarian dibatalkan', 'err');
@@ -477,9 +477,9 @@ function showPopup(e, type, data) {
     }
     html += `<div class="dp-actions">`;
     if (vsEnabled) {
-      html += `<button class="dp-btn dp-btn-force" onclick="vsAction('disable', event)">Disable VS</button>`;
+      html += `<button class="dp-btn dp-btn-force" onclick="vsAction('disable', event)">Disable Virtual Server</button>`;
     } else {
-      html += `<button class="dp-btn dp-btn-enable" onclick="vsAction('enable', event)">Enable VS</button>`;
+      html += `<button class="dp-btn dp-btn-enable" onclick="vsAction('enable', event)">Enable Virtual Server</button>`;
     }
     html += `</div>`;
     popup.dataset.vsName = data.name || '';
@@ -661,7 +661,7 @@ async function vsAction(action, e) {
   if (!activePopup) return;
   const vsName = activePopup.dataset.vsName;
   const partition = activePopup.dataset.vsPartition;
-  if (!vsName) { toast('Data VS tidak lengkap', 'err'); return; }
+  if (!vsName) { toast('Data Virtual Server tidak lengkap', 'err'); return; }
 
   const btn = e.target;
   btn.disabled = true;
@@ -678,18 +678,18 @@ async function vsAction(action, e) {
     });
     const data = await r.json();
     if (r.ok && data.ok) {
-      toast(`VS ${action === 'enable' ? 'enabled' : 'disabled'}: ${vsName}`, 'ok');
+      toast(`Virtual Server ${action === 'enable' ? 'enabled' : 'disabled'}: ${vsName}`, 'ok');
       closePopup();
       doSearch();
     } else {
       toast('Gagal: ' + (data.detail || data.error || 'Unknown'), 'err');
       btn.disabled = false;
-      btn.textContent = action === 'enable' ? 'Enable VS' : 'Disable VS';
+      btn.textContent = action === 'enable' ? 'Enable Virtual Server' : 'Disable Virtual Server';
     }
   } catch (err) {
     toast('Error: ' + err.message, 'err');
     btn.disabled = false;
-    btn.textContent = action === 'enable' ? 'Enable VS' : 'Disable VS';
+    btn.textContent = action === 'enable' ? 'Enable Virtual Server' : 'Disable Virtual Server';
   }
 }
 

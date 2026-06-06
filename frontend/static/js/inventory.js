@@ -308,7 +308,7 @@ async function syncDeviceById(id) {
 
     if (data.status === 'OK') {
       invToast(
-        `✓ ${name}: ${data.vs_ip_synced} VS, ${data.pool_member_ip_synced || data.node_ip_synced || 0} Pool Member, ${data.self_ip_synced || 0} Self IP, ${data.forwarding_vs_skipped} fwd skipped`,
+        `✓ ${name}: ${data.vs_ip_synced} Virtual Server, ${data.pool_member_ip_synced || data.node_ip_synced || 0} Pool Member, ${data.self_ip_synced || 0} Self IP, ${data.forwarding_vs_skipped} fwd skipped`,
         'ok'
       );
     } else {
@@ -334,7 +334,7 @@ async function syncAll() {
     const r = await fetch(`${INV_API}/sync/all`, { method: 'POST' });
     const data = await r.json();
     invToast(
-      `Sync selesai: ${data.success}/${data.total_devices} OK - ${data.vs_ip_synced || 0} VS, ${data.pool_member_ip_synced || data.node_ip_synced || 0} Pool Member, ${data.self_ip_synced || 0} Self IP`,
+      `Sync selesai: ${data.success}/${data.total_devices} OK - ${data.vs_ip_synced || 0} Virtual Server, ${data.pool_member_ip_synced || data.node_ip_synced || 0} Pool Member, ${data.self_ip_synced || 0} Self IP`,
       data.failed > 0 ? 'err' : 'ok'
     );
     loadDevices(); // Refresh status device di tabel management
@@ -403,37 +403,63 @@ async function searchInventory() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function loadInventoryDeviceOptions() {
-  const select = document.getElementById('inv-device-select');
-  if (!select) return;
-  select.innerHTML = '<option value="">-- Loading... --</option>';
+  const deviceInput = document.getElementById('inv-device-select');
+  const deviceList = document.getElementById('inv-device-list');
+  const exportList = document.getElementById('inv-export-device-list');
+  if (!deviceList && !exportList) return;
+  if (deviceInput) deviceInput.placeholder = 'Loading hostname...';
 
   try {
     const r = await fetch(`${INV_API}/devices`);
     const devices = await r.json();
     _deviceList = devices;
 
-    select.innerHTML = '<option value="">-- Pilih Device --</option>';
-    devices.forEach(d => {
-      const label = d.hostname ? `${d.name} (${d.management_ip} - ${d.hostname})` : `${d.name} (${d.management_ip})`;
-      select.innerHTML += `<option value="${d.id}">${escHtml(label)}</option>`;
-    });
+    const hostnameOptions = devices
+      .map(d => (d.hostname || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b))
+      .map(hostname => `<option value="${escAttr(hostname)}"></option>`)
+      .join('');
+
+    if (deviceList) deviceList.innerHTML = hostnameOptions;
+    if (exportList) {
+      exportList.innerHTML = `<option value="All Devices"></option>${hostnameOptions}`;
+    }
+    if (deviceInput) deviceInput.placeholder = 'Hostname...';
   } catch (e) {
-    select.innerHTML = '<option value="">-- Gagal memuat device --</option>';
+    if (deviceInput) deviceInput.placeholder = 'Gagal memuat hostname';
     invToast('Gagal memuat list device: ' + e.message, 'err');
   }
 }
 
+function findDeviceByHostnameInput(inputId, allowAll) {
+  const input = document.getElementById(inputId);
+  const value = input ? input.value.trim() : '';
+
+  if (allowAll && value.toLowerCase() === 'all devices') {
+    return null;
+  }
+
+  if (!value) {
+    return undefined;
+  }
+
+  return _deviceList.find(d => (d.hostname || '').trim().toLowerCase() === value.toLowerCase());
+}
+
 async function loadInventoryForSelected() {
-  const select = document.getElementById('inv-device-select');
-  if (!select) return;
-  const deviceId = select.value;
-  if (!deviceId) {
+  const device = findDeviceByHostnameInput('inv-device-select', false);
+  if (device === undefined) {
     invToast('Pilih device terlebih dahulu', 'err');
     return;
   }
+  if (!device) {
+    invToast('Pilih hostname dari daftar device', 'err');
+    return;
+  }
 
-  const device = _deviceList.find(x => x.id == deviceId);
-  const deviceName = device ? device.name : `Device ID ${deviceId}`;
+  const deviceId = device.id;
+  const deviceName = device.hostname;
 
   const wrap  = document.getElementById('inv-all-wrap');
   const tbody = document.getElementById('inv-all-tbody');
@@ -469,17 +495,39 @@ async function loadInventoryForSelected() {
   }
 }
 
-async function clearInventoryForSelected() {
-  const select = document.getElementById('inv-device-select');
-  if (!select) return;
-  const deviceId = select.value;
-  if (!deviceId) {
+function exportInventory() {
+  const device = findDeviceByHostnameInput('inv-export-device-select', true);
+  const params = new URLSearchParams();
+
+  if (device === undefined) {
     invToast('Pilih device terlebih dahulu', 'err');
     return;
   }
 
-  const device = _deviceList.find(x => x.id == deviceId);
-  const deviceName = device ? device.name : `Device ID ${deviceId}`;
+  if (device) {
+    params.set('device_id', device.id);
+  }
+
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const scope = device ? device.hostname : 'semua device';
+
+  invToast(`Export XLSX ${scope}...`, '');
+  window.location.href = `${INV_API}/inventory/export.xlsx${suffix}`;
+}
+
+async function clearInventoryForSelected() {
+  const device = findDeviceByHostnameInput('inv-device-select', false);
+  if (device === undefined) {
+    invToast('Pilih device terlebih dahulu', 'err');
+    return;
+  }
+  if (!device) {
+    invToast('Pilih hostname dari daftar device', 'err');
+    return;
+  }
+
+  const deviceId = device.id;
+  const deviceName = device.hostname;
 
   if (!confirm(`Yakin ingin menghapus data inventory untuk device "${deviceName}"? Aksi ini tidak bisa dibatalkan.`)) return;
 
@@ -549,7 +597,7 @@ function inventoryHostLink(hostname, ip) {
 }
 
 function typeBadge(type) {
-  if (type === 'VS')   return `<span class="badge badge-vs">VS</span>`;
+  if (type === 'VS')   return `<span class="badge badge-vs">Virtual Server</span>`;
   if (type === 'NODE') return `<span class="badge badge-node">NODE</span>`;
   if (type === 'POOL_MEMBER') return `<span class="badge badge-pool-member">POOL MEMBER</span>`;
   if (type === 'SELF_IP') return `<span class="badge badge-self-ip">SELF IP</span>`;

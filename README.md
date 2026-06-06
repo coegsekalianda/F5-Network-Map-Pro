@@ -14,7 +14,8 @@ Web app untuk memetakan topologi F5 BIG-IP dan mengelola inventory IP lintas dev
 - Export hasil topologi ke PNG dan PDF.
 - Device Management untuk menyimpan daftar F5 BIG-IP.
 - Sync inventory dari banyak device ke database lokal.
-- Search inventory IP untuk tipe `VS`, `POOL_MEMBER`, dan `SELF_IP`.
+- Search inventory IP untuk tipe `Virtual Server`, `POOL_MEMBER`, dan `SELF_IP`.
+- Export inventory ke XLSX untuk semua device atau device tertentu berdasarkan hostname.
 - Password device disimpan terenkripsi menggunakan `SECRET_KEY`.
 
 ## Stack
@@ -117,7 +118,7 @@ http://localhost:8000
    - IP dan port, contoh `10.1.2.3:443`
    - IP Pool Member
 5. Klik `Search`.
-6. Klik node VS, Pool, atau Member untuk melihat detail dan action yang tersedia.
+6. Klik node Virtual Server, Pool, atau Member untuk melihat detail dan action yang tersedia.
 7. Gunakan `Export PNG` atau `Export PDF` jika perlu menyimpan hasil.
 
 ### Devices
@@ -132,9 +133,11 @@ http://localhost:8000
 ### Inventory
 
 1. Buka tab `Inventory`.
-2. Cari IP tertentu untuk melihat apakah IP tersebut muncul sebagai `VS`, `POOL_MEMBER`, atau `SELF_IP`.
-3. Pilih device lalu klik `Load Inventory` untuk melihat semua inventory dari device tersebut.
-4. Gunakan tombol clear hanya jika ingin menghapus data inventory lokal. Ini tidak menghapus konfigurasi di F5.
+2. Cari IP tertentu untuk melihat apakah IP tersebut muncul sebagai `Virtual Server`, `POOL_MEMBER`, atau `SELF_IP`.
+3. Pada `Device Inventory`, ketik atau pilih hostname device lalu klik `Load Inventory`.
+4. Pada `Export Inventory`, ketik atau pilih hostname device lalu klik `Export XLSX`.
+5. Untuk export semua device, pilih `All Devices` pada field export. Field kosong akan menampilkan error `Pilih device terlebih dahulu`.
+6. Gunakan tombol clear hanya jika ingin menghapus data inventory lokal. Ini tidak menghapus konfigurasi di F5.
 
 ## Endpoint Penting
 
@@ -161,6 +164,7 @@ Devices dan inventory:
 - `POST /sync/all` - sync semua device enabled
 - `GET /inventory/search?ip=...` - search inventory IP
 - `GET /inventory/all?device_id=...` - list inventory
+- `GET /inventory/export.xlsx?device_id=...` - export inventory XLSX; kosongkan `device_id` hanya untuk export semua device dari opsi `All Devices`
 - `DELETE /inventory/clear?device_id=...` - clear inventory lokal
 
 ## Catatan Operasional

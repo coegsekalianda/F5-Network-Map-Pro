@@ -107,13 +107,21 @@
       <section class="panel">
         <div class="panel-label">Device Inventory</div>
         <div class="field-group">
-          <label class="form-label" style="font-size: 11px; margin-bottom: 2px; display: block; opacity: 0.85;">Pilih Device:</label>
-          <select id="inv-device-select" class="inp" style="background: #2a2b36; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 6px; cursor: pointer; margin-bottom: 8px; width: 100%;">
-            <option value="">-- Pilih Device --</option>
-          </select>
+          <input id="inv-device-select" class="inp mono" list="inv-device-list" placeholder="Hostname..." autocomplete="off" style="background: #2a2b36; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 6px; margin-bottom: 8px; width: 100%;"/>
+          <datalist id="inv-device-list"></datalist>
           <button class="btn btn-primary" onclick="loadInventoryForSelected()" style="margin-bottom: 4px;">Load Inventory</button>
           <button class="btn btn-danger btn-clear-selected" onclick="clearInventoryForSelected()">Clear Selected Inventory</button>
           <button class="btn btn-clear-all clear-all-inventory-btn" onclick="clearAllInventory()">Clear All Inventory</button>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-label">Export Inventory</div>
+        <div class="field-group">
+          <input id="inv-export-device-select" class="inp mono" list="inv-export-device-list" placeholder="Hostname..." autocomplete="off" style="background: #2a2b36; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 6px; margin-bottom: 8px; width: 100%;"/>
+          <datalist id="inv-export-device-list">
+            <option value="All Devices"></option>
+          </datalist>
+          <button class="btn" onclick="exportInventory()">Export XLSX</button>
         </div>
       </section>
     </div>
@@ -259,7 +267,7 @@
   </main>
 
 </div>
-<script src="/static/js/app.js?v=7"></script>
-<script src="/static/js/inventory.js?v=4"></script>
+<script src="/static/js/app.js?v=8"></script>
+<script src="/static/js/inventory.js?v=11"></script>
 </body>
 </html>

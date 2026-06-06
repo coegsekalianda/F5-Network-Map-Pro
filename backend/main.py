@@ -1688,7 +1688,7 @@ async def vs_action(req: VSActionRequest):
             if r.status_code == 401:
                 raise HTTPException(status_code=401, detail="Unauthorized")
             if r.status_code == 404:
-                raise HTTPException(status_code=404, detail=f"VS {req.vs_name} tidak ditemukan")
+                raise HTTPException(status_code=404, detail=f"Virtual Server {req.vs_name} tidak ditemukan")
             r.raise_for_status()
 
         return {"ok": True, "action": req.action, "vs": req.vs_name}
