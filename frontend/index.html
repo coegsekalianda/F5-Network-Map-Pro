@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>F5 Network Map Pro</title>
+<meta name="description" content="F5 Network Map Pro for BIG-IP topology and inventory management. Search Virtual Server, Pool Member, Self IP, and manage F5 inventory across multiple devices."/>
+<link rel="stylesheet" href="/static/css/app.css?v=11"/>
+</head>
+<body>
+<div id="app">
+
+  <!-- LEFT SIDEBAR -->
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-left">
+        <span class="brand-dot"></span>
+        <span class="brand-name">F5 Network Map Pro</span>
+      </div>
+    
+      <button id="sidebar-toggle" onclick="toggleSidebar()">-</button>
+    </div>
+
+    <!-- TAB NAVIGATION -->
+    <nav class="tab-nav">
+      <button class="tab-btn tab-active" id="tab-topology" onclick="switchTab('topology')">Topology</button>
+      <button class="tab-btn" id="tab-devices" onclick="switchTab('devices')">Devices</button>
+      <button class="tab-btn" id="tab-inventory" onclick="switchTab('inventory')">Inventory</button>
+    </nav>
+
+    <!-- TOPOLOGY SIDEBAR PANELS -->
+    <div id="sidebar-topology">
+      <section class="panel">
+        <div class="panel-label">Connection</div>
+        <div class="field-group">
+          <input
+            id="inp-host"
+            class="inp mono"
+            placeholder="F5 host / IP"
+            list="device-list"
+          >
+          
+          <datalist id="device-list">
+            <option value="10.12.157.215" label="ETP DEV">
+            <option value="10.12.157.216" label="ETP DEV2">
+            <option value="10.12.157.240" label="ETP DEV3">
+            <option value="10.12.157.217" label="ETP PRD">
+            <option value="10.12.157.238" label="ETP PRD2">
+            <option value="10.12.145.237" label="SOA DEV">
+            <option value="10.12.157.218" label="SOA PREPROD">
+          </datalist>
+          <input type="text" id="inp-user" class="inp" placeholder="Username" value="msi"/>
+          <input type="password" id="inp-pass" class="inp" placeholder="Password" value="pa55wordF5!23"/>
+          <label class="check-row"><input type="checkbox" id="chk-ssl"/> Skip SSL verify</label>
+          <button class="btn btn-primary" onclick="testConnection()">Connect</button>
+          <div id="conn-status" class="conn-status"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-label">Search</div>
+        <div class="field-group">
+          <input type="text" id="inp-ip" class="inp mono" placeholder="Nama VS/Pool atau IP..."/>
+          <button class="btn btn-primary" onclick="doSearch()">Search</button>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-health" style="display:none">
+        <div class="panel-label">Summary</div>
+        <div id="health-grid" class="health-grid"></div>
+      </section>
+
+      <section class="panel" id="panel-export" style="display:none">
+        <div class="panel-label">Export</div>
+        <div class="field-group">
+          <button class="btn" onclick="exportPNG()">Export PNG</button>
+          <button class="btn" onclick="exportPDF()">Export PDF</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- DEVICES SIDEBAR PANELS -->
+    <div id="sidebar-devices" style="display:none">
+      <section class="panel">
+        <div class="panel-label">Device Management</div>
+        <div class="field-group">
+          <button class="btn btn-primary" onclick="showDeviceForm(null)">+ Add Device</button>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-label">Sync</div>
+        <div class="field-group">
+          <button class="btn btn-primary" id="btn-sync-all" onclick="syncAll()">⟳ Sync All</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- INVENTORY SIDEBAR PANELS -->
+    <div id="sidebar-inventory" style="display:none">
+      <section class="panel">
+        <div class="panel-label">Search IP</div>
+        <div class="field-group">
+          <input type="text" id="inv-search-ip" class="inp mono" placeholder="Masukkan IP..."/>
+          <button class="btn btn-primary" onclick="searchInventory()">Search</button>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-label">Device Inventory</div>
+        <div class="field-group">
+          <label class="form-label" style="font-size: 11px; margin-bottom: 2px; display: block; opacity: 0.85;">Pilih Device:</label>
+          <select id="inv-device-select" class="inp" style="background: #2a2b36; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 6px; cursor: pointer; margin-bottom: 8px; width: 100%;">
+            <option value="">-- Pilih Device --</option>
+          </select>
+          <button class="btn btn-primary" onclick="loadInventoryForSelected()" style="margin-bottom: 4px;">Load Inventory</button>
+          <button class="btn btn-danger btn-clear-selected" onclick="clearInventoryForSelected()">Clear Selected Inventory</button>
+          <button class="btn btn-clear-all clear-all-inventory-btn" onclick="clearAllInventory()">Clear All Inventory</button>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- MAIN CONTENT -->
+  <main id="main">
+    <div id="topbar">
+      <div class="status-area">
+        <span id="status-msg" class="status-msg">Hubungkan ke F5, lalu masukkan IP.</span>
+        <button id="btn-cancel-search" class="btn btn-sm btn-cancel-search" onclick="cancelSearch()" style="display:none">Cancel</button>
+      </div>
+      <div id="bulk-header-container" class="bulk-header-container">
+        <button id="btn-bulk-mode" class="btn btn-primary" onclick="enterBulkMode()" style="display: none;">Bulk Action</button>
+        <div id="bulk-action-controls" class="bulk-action-controls" style="display: none;">
+          <span id="bulk-header-count" class="bulk-header-count"></span>
+          <button id="btn-bulk-enable" class="btn btn-primary" onclick="bulkMemberAction('enable')" disabled>Enable</button>
+          <button id="btn-bulk-force" class="btn btn-danger" onclick="bulkMemberAction('force-offline')" disabled>Force Offline</button>
+          <button id="btn-bulk-cancel" class="btn" onclick="exitBulkMode()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TOPOLOGY PAGE -->
+    <div id="page-topology">
+      <div id="tree-container">
+        <div id="tree-empty" class="tree-empty">
+          <div class="empty-icon">O</div>
+          <div class="empty-text">Hasil pencarian akan tampil di sini</div>
+        </div>
+        <div id="tree-root"></div>
+      </div>
+    </div>
+
+    <!-- DEVICES PAGE -->
+    <div id="page-devices" style="display:none" class="inv-page">
+      <div class="inv-page-header">
+        <h1 class="inv-page-title">Device Management</h1>
+        <p class="inv-page-desc">Kelola daftar perangkat F5 BIG-IP yang akan di-sync ke inventory.</p>
+      </div>
+
+      <!-- Device Form (hidden by default) -->
+      <div id="device-form-wrap" class="device-form-wrap" style="display:none">
+        <div class="device-form">
+          <div class="device-form-title" id="device-form-title">Tambah Device</div>
+          <input type="hidden" id="device-form-id"/>
+          <div class="form-grid">
+            <div class="form-field">
+              <label class="form-label">Name / Label</label>
+              <input type="text" id="dform-name" class="inp" placeholder="F5-DC1-LTM-01"/>
+            </div>
+            <div class="form-field">
+              <label class="form-label">Management IP</label>
+              <input type="text" id="dform-ip" class="inp mono" placeholder="10.1.2.3"/>
+            </div>
+            <div class="form-field">
+              <label class="form-label">Username</label>
+              <input type="text" id="dform-user" class="inp" placeholder="admin" value="admin"/>
+            </div>
+            <div class="form-field">
+              <label class="form-label">Password</label>
+              <input type="password" id="dform-pass" class="inp" placeholder="Kosongkan jika tidak ingin mengubah"/>
+            </div>
+            <div class="form-field form-field-inline">
+              <label class="check-row">
+                <input type="checkbox" id="dform-ssl"/> Skip SSL verify
+              </label>
+              <label class="check-row">
+                <input type="checkbox" id="dform-enabled" checked/> Enabled
+              </label>
+            </div>
+          </div>
+          <div class="device-form-actions">
+            <button class="btn btn-primary" onclick="saveDevice()">Save</button>
+            <button class="btn" id="dform-test-btn" onclick="testDeviceFormConnection()" style="display:none">Test Connection</button>
+            <button class="btn" onclick="cancelDeviceForm()">Cancel</button>
+          </div>
+          <div id="dform-status" class="dform-status"></div>
+        </div>
+      </div>
+
+      <!-- Devices Table -->
+      <div class="inv-table-wrap">
+        <table class="inv-table" id="devices-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Management IP</th>
+              <th>Username</th>
+              <th>Status</th>
+              <th>Last Sync</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="devices-tbody">
+            <tr><td colspan="6" class="inv-empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- INVENTORY PAGE -->
+    <div id="page-inventory" style="display:none" class="inv-page">
+      <div class="inv-page-header">
+        <h1 class="inv-page-title">IP Inventory</h1>
+        <p class="inv-page-desc">Cari IP Virtual Server, Pool Member, atau Self IP dari database inventory F5.</p>
+      </div>
+
+
+
+      <!-- Search Result -->
+      <div id="inv-search-result" class="inv-search-result" style="display:none">
+        <div class="inv-search-result-title" id="inv-search-label"></div>
+        <div id="inv-search-table-wrap"></div>
+      </div>
+
+      <!-- All Inventory Table -->
+      <div id="inv-all-wrap" style="display:none">
+        <div class="inv-table-wrap">
+          <div class="inv-table-header">
+            <span class="inv-table-title" id="inv-table-title">Inventory Device</span>
+            <span id="inv-all-count" class="inv-count-badge"></span>
+          </div>
+          <table class="inv-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Hostname</th>
+                <th>IP</th>
+                <th>Type</th>
+                <th>Last Seen</th>
+              </tr>
+            </thead>
+            <tbody id="inv-all-tbody">
+              <tr><td colspan="5" class="inv-empty">Klik "Load Inventory" untuk memuat data.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </main>
+
+</div>
+<script src="/static/js/app.js?v=7"></script>
+<script src="/static/js/inventory.js?v=4"></script>
+</body>
+</html>
