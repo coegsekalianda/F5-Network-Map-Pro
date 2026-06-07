@@ -41,10 +41,12 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # ─── Inventory Feature: routers ───────────────────────────────────────────────
 from backend.routers import devices as devices_router
 from backend.routers import inventory as inventory_router
+from backend.routers import monitoring as monitoring_router
 from backend.routers import sync as sync_router
 
 app.include_router(devices_router.router)
 app.include_router(inventory_router.router)
+app.include_router(monitoring_router.router)
 app.include_router(sync_router.router)
 
 
@@ -126,6 +128,46 @@ async def f5_get(cfg: F5Config, path: str, client: httpx.AsyncClient = None) -> 
                     return {"items": []}
                 r.raise_for_status()
                 return r.json()
+
+
+async def f5_get_collection_items(
+    cfg: F5Config,
+    collection_path: str,
+    select: str,
+    page_size: int = 5000,
+) -> list[dict]:
+    items: list[dict] = []
+    skip = 0
+    seen_pages: set[tuple] = set()
+
+    while True:
+        data = await f5_get(
+            cfg,
+            f"{collection_path}?$select={select}&$top={page_size}&$skip={skip}",
+        )
+        page_items = data.get("items", []) if isinstance(data, dict) else []
+        if not page_items:
+            break
+
+        signature = tuple(
+            item.get("selfLink") or item.get("fullPath") or item.get("name")
+            for item in page_items[:5]
+        )
+        if signature in seen_pages:
+            break
+        seen_pages.add(signature)
+
+        items.extend(page_items)
+
+        total_items = data.get("totalItems")
+        if isinstance(total_items, int) and len(items) >= total_items:
+            break
+        if len(page_items) < page_size:
+            break
+
+        skip += page_size
+
+    return items
 
 
 def _looks_like_ip(s: str) -> bool:
@@ -1000,6 +1042,11 @@ _INDEX_HTML = os.path.normpath(_INDEX_HTML)
 async def root():
     return FileResponse(_INDEX_HTML)
 
+
+@app.get("/monitoring")
+async def monitoring_page():
+    return FileResponse(_INDEX_HTML)
+
 async def f5_bash(cfg: F5Config, cmd: str, client: httpx.AsyncClient = None) -> str:
     async with F5_SEMAPHORE:
         url = f"https://{cfg.host}/mgmt/tm/util/bash"
@@ -1488,13 +1535,12 @@ async def search_unified(cfg: F5Config, q: str):
 async def get_health(cfg: F5Config):
     try:
         vs_data, pool_data = await asyncio.gather(
-            f5_get(cfg, "ltm/virtual?$select=name,partition,enabled&$top=1000"),
-            f5_get(cfg, "ltm/pool?$select=name,partition&$top=500"),
-            return_exceptions=True
+            f5_get_collection_items(cfg, "ltm/virtual", "name,partition,enabled,disabled"),
+            f5_get_collection_items(cfg, "ltm/pool", "name,partition"),
         )
-        vs_items   = vs_data.get("items", []) if isinstance(vs_data, dict) else []
-        pool_items = pool_data.get("items", []) if isinstance(pool_data, dict) else []
-        vs_up = sum(1 for v in vs_items if v.get("enabled", False))
+        vs_items = vs_data if isinstance(vs_data, list) else []
+        pool_items = pool_data if isinstance(pool_data, list) else []
+        vs_up = sum(1 for v in vs_items if v.get("enabled", False) and not v.get("disabled", False))
         return {
             "status": "ok",
             "summary": {
@@ -1522,7 +1568,13 @@ async def test_connection(cfg: F5Config):
     except HTTPException as e:
         return {"ok": False, "error": e.detail}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        if isinstance(e, httpx.TimeoutException):
+            error = "Timeout koneksi ke F5"
+        elif isinstance(e, httpx.ConnectError):
+            error = "Tidak bisa konek ke F5"
+        else:
+            error = str(e) or e.__class__.__name__ or "Koneksi gagal"
+        return {"ok": False, "error": error}
 
 
 @app.post("/api/member-action")

@@ -37,13 +37,15 @@ async def get_topology_config_by_hostname(
     hostname: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """Ambil config login topology berdasarkan hostname hasil inventory."""
+    """Ambil config login topology berdasarkan hostname, name, atau management IP."""
     res = await db.execute(
         text(
             """
             SELECT *
             FROM devices
-            WHERE hostname = :hostname OR name = :hostname
+            WHERE hostname = :hostname
+               OR name = :hostname
+               OR management_ip = :hostname
             ORDER BY enabled DESC, name ASC
             LIMIT 1
             """

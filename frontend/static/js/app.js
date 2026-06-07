@@ -2,6 +2,8 @@ let cfg = { host: '', username: 'admin', password: '', verify_ssl: false };
 let activePopup = null;
 let selectedMembers = new Map();
 let activeSearchController = null;
+let topologyDevices = [];
+let lastTopologyDeviceValue = '';
 
 const API = '';
 
@@ -42,6 +44,100 @@ function getConfig() {
   };
 }
 
+// --- TOPOLOGY DEVICE PICKER ---
+async function loadTopologyDeviceOptions() {
+  const list = document.getElementById('device-list');
+  if (!list) return;
+
+  try {
+    const r = await fetch(`${API}/devices`);
+    const devices = await r.json();
+    topologyDevices = Array.isArray(devices) ? devices : [];
+    list.innerHTML = topologyDevices.map(d => {
+      const value = d.hostname || d.name || d.management_ip;
+      const labelParts = [d.name, d.management_ip].filter(Boolean);
+      const label = labelParts.join(' - ');
+      return `<option value="${escAttrLocal(value)}" label="${escAttrLocal(label)}"></option>`;
+    }).join('');
+  } catch (e) {
+    topologyDevices = [];
+    console.warn('Failed to load topology devices', e);
+  }
+}
+
+function escAttrLocal(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function findTopologyDevice(value) {
+  const q = String(value || '').trim().toLowerCase();
+  if (!q) return null;
+  return topologyDevices.find(d => {
+    const candidates = [d.hostname, d.name, d.management_ip].filter(Boolean);
+    return candidates.some(item => String(item).trim().toLowerCase() === q);
+  }) || null;
+}
+
+async function handleTopologyDeviceSelected() {
+  const input = document.getElementById('inp-host');
+  const statusEl = document.getElementById('conn-status');
+  if (!input) return;
+
+  const value = input.value.trim();
+  if (!value || value === lastTopologyDeviceValue) return;
+
+  const device = findTopologyDevice(value);
+  if (!device) return;
+
+  lastTopologyDeviceValue = value;
+  const lookup = device.hostname || device.name || device.management_ip;
+  if (statusEl) {
+    statusEl.textContent = `Loading ${lookup}...`;
+    statusEl.className = 'conn-status';
+  }
+
+  try {
+    const r = await fetch(`${API}/devices/topology-config/by-hostname/${encodeURIComponent(lookup)}`);
+    const data = await r.json();
+    if (!r.ok) {
+      throw new Error(data.detail || 'Device tidak ditemukan');
+    }
+
+    document.getElementById('inp-host').value = data.management_ip || '';
+    document.getElementById('inp-user').value = data.username || '';
+    document.getElementById('inp-pass').value = data.password || '';
+    document.getElementById('chk-ssl').checked = Boolean(data.verify_ssl);
+    setStatus(`Auto login ke ${data.hostname || data.name || data.management_ip}...`, '');
+    await testConnection();
+  } catch (e) {
+    if (statusEl) {
+      statusEl.textContent = 'x ' + e.message;
+      statusEl.className = 'conn-status conn-err';
+    }
+    toast('Gagal auto login device: ' + e.message, 'err');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadTopologyDeviceOptions();
+  const hostInput = document.getElementById('inp-host');
+  if (hostInput) {
+    hostInput.addEventListener('change', handleTopologyDeviceSelected);
+    hostInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleTopologyDeviceSelected();
+      }
+    });
+  }
+});
+
 // --- CONNECTION ---
 async function testConnection() {
   const config = getConfig();
@@ -55,18 +151,19 @@ async function testConnection() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     });
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
     if (data.ok) {
-      statusEl.textContent = `✓ ${data.version || 'connected'}`;
+      statusEl.textContent = `OK ${data.version || 'connected'}`;
       statusEl.className = 'conn-status conn-ok';
       setStatus(`Connected to ${data.host}`, 'ok');
       loadHealth();
     } else {
-      statusEl.textContent = '✗ ' + data.error;
+      const error = data.error || data.detail || (r.ok ? 'Koneksi gagal' : `HTTP ${r.status}`);
+      statusEl.textContent = 'x ' + error;
       statusEl.className = 'conn-status conn-err';
     }
   } catch (e) {
-    statusEl.textContent = '✗ ' + e.message;
+    statusEl.textContent = 'x ' + (e.message || 'Koneksi gagal');
     statusEl.className = 'conn-status conn-err';
   }
 }

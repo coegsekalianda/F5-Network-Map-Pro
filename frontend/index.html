@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>F5 Network Map Pro</title>
 <meta name="description" content="F5 Network Map Pro for BIG-IP topology and inventory management. Search Virtual Server, Pool Member, Self IP, and manage F5 inventory across multiple devices."/>
-<link rel="stylesheet" href="/static/css/app.css?v=11"/>
+<link rel="stylesheet" href="/static/css/app.css?v=17"/>
 </head>
 <body>
 <div id="app">
@@ -36,23 +36,15 @@
           <input
             id="inp-host"
             class="inp mono"
-            placeholder="F5 host / IP"
+            placeholder="Pilih device..."
             list="device-list"
+            autocomplete="off"
           >
           
-          <datalist id="device-list">
-            <option value="10.12.157.215" label="ETP DEV">
-            <option value="10.12.157.216" label="ETP DEV2">
-            <option value="10.12.157.240" label="ETP DEV3">
-            <option value="10.12.157.217" label="ETP PRD">
-            <option value="10.12.157.238" label="ETP PRD2">
-            <option value="10.12.145.237" label="SOA DEV">
-            <option value="10.12.157.218" label="SOA PREPROD">
-          </datalist>
-          <input type="text" id="inp-user" class="inp" placeholder="Username" value="msi"/>
-          <input type="password" id="inp-pass" class="inp" placeholder="Password" value="pa55wordF5!23"/>
-          <label class="check-row"><input type="checkbox" id="chk-ssl"/> Skip SSL verify</label>
-          <button class="btn btn-primary" onclick="testConnection()">Connect</button>
+          <datalist id="device-list"></datalist>
+          <input type="hidden" id="inp-user" value="admin"/>
+          <input type="hidden" id="inp-pass" value=""/>
+          <input type="checkbox" id="chk-ssl" style="display:none"/>
           <div id="conn-status" class="conn-status"></div>
         </div>
       </section>
@@ -85,6 +77,7 @@
         <div class="panel-label">Device Management</div>
         <div class="field-group">
           <button class="btn btn-primary" onclick="showDeviceForm(null)">+ Add Device</button>
+          <button class="btn" onclick="openMonitoringPage()">Monitoring</button>
         </div>
       </section>
       <section class="panel">
@@ -122,6 +115,31 @@
             <option value="All Devices"></option>
           </datalist>
           <button class="btn" onclick="exportInventory()">Export XLSX</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- MONITORING SIDEBAR PANELS -->
+    <div id="sidebar-monitoring" style="display:none">
+      <section class="panel">
+        <div class="panel-label">VS Connection Monitor</div>
+        <div class="field-group">
+          <input id="mon-device-input" class="inp mono" list="mon-device-list" placeholder="Device hostname..." autocomplete="off"/>
+          <datalist id="mon-device-list"></datalist>
+          <button class="btn" onclick="loadMonitorVirtualServers()">Load Virtual Server</button>
+          <input id="mon-vs-input" class="inp mono" list="mon-vs-list" placeholder="Virtual Server..." autocomplete="off"/>
+          <datalist id="mon-vs-list"></datalist>
+          <input id="mon-label-input" class="inp" placeholder="Custom label"/>
+          <button class="btn btn-primary" onclick="addMonitorTarget()">Add VS Monitor</button>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-label">Dashboard</div>
+        <div class="field-group">
+          <label class="check-row"><input type="checkbox" id="mon-combined-toggle" onchange="setMonitoringCombined(this.checked)"/> Combined chart</label>
+          <button class="btn" onclick="saveMonitoringDashboard()">Save Dashboard</button>
+          <button class="btn" onclick="loadMonitoringDashboard()">Load Dashboard</button>
+          <button class="btn btn-danger" onclick="clearMonitoringDashboard()">Clear Dashboard</button>
         </div>
       </section>
     </div>
@@ -263,11 +281,36 @@
       </div>
     </div>
 
+    <!-- MONITORING PAGE -->
+    <div id="page-monitoring" style="display:none" class="inv-page monitoring-page">
+      <div class="inv-page-header">
+        <h1 class="inv-page-title">VS Connection Monitor</h1>
+        <p class="inv-page-desc">Realtime connection dashboard untuk beberapa Virtual Server dari beberapa device F5.</p>
+      </div>
+      <div id="monitoring-empty" class="tree-empty monitoring-empty">
+        <div class="empty-icon">M</div>
+        <div class="empty-text">Tambahkan target monitoring dari sidebar</div>
+      </div>
+      <div id="monitoring-combined-wrap" class="monitor-combined-wrap" style="display:none">
+        <div class="monitor-card monitor-combined-card">
+          <div class="monitor-card-head">
+            <div>
+              <div class="monitor-card-title">Combined Current Connections</div>
+              <div class="monitor-card-sub">Perbandingan semua target</div>
+            </div>
+          </div>
+          <canvas id="monitoring-combined-chart" class="monitor-chart"></canvas>
+        </div>
+      </div>
+      <div id="monitoring-grid" class="monitor-grid"></div>
+    </div>
+
     <div id="toast" class="toast hidden"></div>
   </main>
 
 </div>
-<script src="/static/js/app.js?v=8"></script>
-<script src="/static/js/inventory.js?v=11"></script>
+<script src="/static/js/app.js?v=10"></script>
+<script src="/static/js/inventory.js?v=16"></script>
+<script src="/static/js/monitoring.js?v=10"></script>
 </body>
 </html>

@@ -8,42 +8,78 @@
 
 const INV_API = '';  // relatif ke origin yang sama
 
+function routeForTab(tab) {
+  return tab === 'monitoring' ? '/monitoring' : '/';
+}
+
+function updateRouteForTab(tab, replace = false) {
+  const nextPath = routeForTab(tab);
+  if (window.location.pathname === nextPath) return;
+  const method = replace ? 'replaceState' : 'pushState';
+  window.history[method]({ tab }, '', nextPath);
+}
+
+function tabFromRoute() {
+  return window.location.pathname === '/monitoring' ? 'monitoring' : 'topology';
+}
+
+function openMonitoringPage() {
+  window.open('/monitoring', '_blank', 'noopener');
+}
+
 // ─── Tab Navigation ────────────────────────────────────────────────────────────
 
-function switchTab(tab) {
+function switchTab(tab, options = {}) {
+  updateRouteForTab(tab, Boolean(options.replace));
+  document.body.classList.toggle('monitoring-standalone', tab === 'monitoring');
+
   // Sembunyikan semua sidebar panels & pages
   document.getElementById('sidebar-topology').style.display = 'none';
   document.getElementById('sidebar-devices').style.display  = 'none';
   document.getElementById('sidebar-inventory').style.display = 'none';
+  document.getElementById('sidebar-monitoring').style.display = 'none';
 
   document.getElementById('page-topology').style.display  = 'none';
   document.getElementById('page-devices').style.display   = 'none';
   document.getElementById('page-inventory').style.display = 'none';
+  document.getElementById('page-monitoring').style.display = 'none';
 
   // Reset topbar
   const topbar = document.getElementById('topbar');
+  topbar.style.display = 'flex';
   document.getElementById('status-msg').textContent = '';
   document.getElementById('bulk-header-container').style.display = 'none';
 
   // Hapus active dari semua tab
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-active'));
-  document.getElementById(`tab-${tab}`).classList.add('tab-active');
+  const tabButton = document.getElementById(`tab-${tab}`);
+  if (tabButton) tabButton.classList.add('tab-active');
 
   if (tab === 'topology') {
+    if (typeof stopMonitoringPolling === 'function') stopMonitoringPolling();
     document.getElementById('sidebar-topology').style.display = 'block';
     document.getElementById('page-topology').style.display    = 'flex';
     document.getElementById('status-msg').textContent = 'Hubungkan ke F5, lalu masukkan IP.';
     document.getElementById('bulk-header-container').style.display = 'flex';
+    if (typeof loadTopologyDeviceOptions === 'function') loadTopologyDeviceOptions();
   } else if (tab === 'devices') {
+    if (typeof stopMonitoringPolling === 'function') stopMonitoringPolling();
     document.getElementById('sidebar-devices').style.display = 'block';
     document.getElementById('page-devices').style.display    = 'block';
     document.getElementById('status-msg').textContent = 'Device Management';
     loadDevices();
   } else if (tab === 'inventory') {
+    if (typeof stopMonitoringPolling === 'function') stopMonitoringPolling();
     document.getElementById('sidebar-inventory').style.display = 'block';
     document.getElementById('page-inventory').style.display    = 'block';
     document.getElementById('status-msg').textContent = 'IP Inventory';
     loadInventoryDeviceOptions();
+  } else if (tab === 'monitoring') {
+    document.getElementById('sidebar-monitoring').style.display = 'block';
+    document.getElementById('page-monitoring').style.display    = 'block';
+    document.getElementById('topbar').style.display = 'none';
+    document.getElementById('status-msg').textContent = 'VS Connection Monitor';
+    if (typeof initMonitoringPage === 'function') initMonitoringPage();
   }
 }
 
@@ -612,4 +648,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (e.key === 'Enter') searchInventory();
     });
   }
+
+  switchTab(tabFromRoute(), { replace: true });
+  window.addEventListener('popstate', () => {
+    switchTab(tabFromRoute(), { replace: true });
+  });
 });
