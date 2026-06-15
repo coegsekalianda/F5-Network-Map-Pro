@@ -1,23 +1,24 @@
 """
-services/f5_client.py — F5 BIG-IP iControl REST client untuk inventory sync.
+F5 BIG-IP iControl REST client used for inventory sync.
 
-Fungsi utama:
-  - test_connection()            : verifikasi login
-  - get_hostname()               : ambil hostname dari global-settings
-  - get_virtual_server_ips()     : ambil IP VS, skip forwarding
-  - get_pool_member_ips()        : ambil IP pool member
-  - get_self_ips()               : ambil Self IP
+Main methods:
+  - test_connection()            : verify login
+  - get_hostname()               : read hostname from global-settings
+  - get_virtual_server_ips()     : read Virtual Server IPs and skip forwarding VS
+  - get_pool_member_ips()        : read Pool Member IPs
+  - get_self_ips()               : read Self IPs
 
-Parsing:
-  - extract_ip_from_destination(): strip partition, route domain, port
-  - extract_ip_from_address()    : strip partition, route domain, prefix, port
-  - is_forwarding_virtual()      : deteksi Forwarding VS
+Parsing helpers:
+  - extract_ip_from_destination(): strip partition, route domain, and port
+  - extract_ip_from_address()    : strip partition, route domain, prefix, and port
+  - is_forwarding_virtual()      : detect Forwarding VS records
 """
-import re
+import asyncio
 import base64
 import logging
-import asyncio
+import re
 from typing import Optional
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -32,56 +33,69 @@ def _basic_auth_header(username: str, password: str) -> dict:
     return {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
 
 
+def _clean_port(value) -> str:
+    if value is None:
+        return ""
+
+    port = str(value).strip()
+    if not port or port.lower() in ("any", "all", "*"):
+        return ""
+
+    return port
+
+
+def extract_ip_port_from_value(value: str) -> tuple[Optional[str], str]:
+    """
+    Extract IPv4 and port from common F5 formats:
+      /Common/10.1.2.3:443       -> ("10.1.2.3", "443")
+      /Common/10.1.2.3%123:443   -> ("10.1.2.3", "443")
+      /Common/10.1.2.3.any       -> ("10.1.2.3", "")
+      10.1.2.3/24                -> ("10.1.2.3", "")
+    """
+    if not value:
+        return None, ""
+
+    raw = str(value).strip()
+    if raw.startswith("/"):
+        raw = raw.split("/", 2)[-1]
+
+    raw = raw.split("/", 1)[0]
+    match = re.match(
+        r"^(?P<ip>\d{1,3}(?:\.\d{1,3}){3})(?:%\d+)?(?:(?::|\.)(?P<port>[^/]+))?$",
+        raw,
+    )
+    if not match:
+        return None, ""
+
+    return match.group("ip"), _clean_port(match.group("port"))
+
+
 def extract_ip_from_destination(destination: str) -> Optional[str]:
     """
-    Ambil hanya IP dari destination F5. Contoh:
+    Extract only the IP from an F5 destination value.
+    Examples:
       /Common/192.168.10.10:443       -> 192.168.10.10
       /Common/192.168.10.10%123:443   -> 192.168.10.10
       192.168.10.10:443               -> 192.168.10.10
       /Common/10.10.10.10.any         -> 10.10.10.10
     """
-    if not destination:
-        return None
-
-    # Buang prefix partition (/Common/, /Partition/)
-    raw = destination.strip()
-    if raw.startswith("/"):
-        raw = raw.split("/", 2)[-1]   # ambil bagian setelah /Partition/
-
-    # Pisah IP dari route domain dan port
-    # Format: 10.1.2.3%123:443 atau 10.1.2.3:443 atau 10.1.2.3.any
-    # Buang route domain dulu
-    raw = raw.split("%")[0]
-
-    # Pisah port (colon atau .any, .all)
-    if ":" in raw:
-        raw = raw.rsplit(":", 1)[0]
-    elif re.search(r"\.\D+$", raw):
-        # e.g. 10.10.10.10.any
-        raw = re.sub(r"\.\D+$", "", raw)
-
-    # Validasi format IP
-    if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", raw):
-        return raw
-
-    return None
+    ip, _port = extract_ip_port_from_value(destination)
+    return ip
 
 
 def extract_ip_from_node_address(address: str) -> Optional[str]:
     """
-    Ambil IP dari node address F5.
-    Format: 10.45.5.160, /Common/10.45.5.160, 10.45.5.160%123
+    Extract the IP from an F5 node address.
+    Supported formats: 10.45.5.160, /Common/10.45.5.160, 10.45.5.160%123.
     """
     if not address:
         return None
 
     raw = address.strip()
 
-    # Buang partition prefix
     if raw.startswith("/"):
         raw = raw.split("/")[-1]
 
-    # Buang route domain
     raw = raw.split("%")[0]
 
     if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", raw):
@@ -92,37 +106,18 @@ def extract_ip_from_node_address(address: str) -> Optional[str]:
 
 def extract_ip_from_address(value: str) -> Optional[str]:
     """
-    Ambil IPv4 dari format umum F5:
+    Extract IPv4 from common F5 formats:
       /Common/10.1.2.3:80      -> 10.1.2.3
       10.1.2.3%123:80          -> 10.1.2.3
       10.1.2.3/24              -> 10.1.2.3
       10.1.2.3.any             -> 10.1.2.3
     """
-    if not value:
-        return None
-
-    raw = str(value).strip()
-    if raw.startswith("/"):
-        raw = raw.split("/", 2)[-1]
-
-    raw = raw.split("%", 1)[0]
-    raw = raw.split("/", 1)[0]
-
-    if ":" in raw:
-        raw = raw.rsplit(":", 1)[0]
-    elif re.search(r"\.\D+$", raw):
-        raw = re.sub(r"\.\D+$", "", raw)
-
-    if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", raw):
-        return raw
-
-    return None
+    ip, _port = extract_ip_port_from_value(value)
+    return ip
 
 
 def is_forwarding_virtual(vs: dict) -> bool:
-    """
-    Return True jika VS adalah Forwarding IP atau Forwarding L2 — jangan simpan ke inventory.
-    """
+    """Return True when the Virtual Server is Forwarding IP or Forwarding L2."""
     vs_type = str(vs.get("type", "")).lower()
 
     if vs_type == "forwarding-ip" or vs_type == "forwarding-l2":
@@ -130,7 +125,6 @@ def is_forwarding_virtual(vs: dict) -> bool:
     if "forwarding" in vs_type:
         return True
 
-    # Cek boolean flags
     if vs.get("ipForward") is True or str(vs.get("ipForward")).lower() == "true":
         return True
     if vs.get("l2Forward") is True or str(vs.get("l2Forward")).lower() == "true":
@@ -162,14 +156,14 @@ class F5Client:
         url = self._url(path)
         r = await client.get(url, headers=self._headers)
         if r.status_code == 401:
-            raise PermissionError(f"Unauthorized — cek username/password untuk {self.host}")
+            raise PermissionError(f"Unauthorized. Check username/password for {self.host}")
         if r.status_code == 404:
             return {"items": []}
         r.raise_for_status()
         return r.json()
 
     async def test_connection(self) -> dict:
-        """Test koneksi ke F5, return {'ok': True, 'version': '...'}."""
+        """Test F5 connectivity and return {'ok': True, 'version': '...'}."""
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=self.timeout) as client:
             try:
                 data = await self._get(client, "sys/version")
@@ -186,30 +180,27 @@ class F5Client:
                 return {"ok": False, "error": str(e)}
 
     async def get_hostname(self, client: httpx.AsyncClient) -> str:
-        """
-        Ambil hostname F5 dari /mgmt/tm/sys/global-settings.
-        Field: hostname
-        """
+        """Read the F5 hostname from /mgmt/tm/sys/global-settings."""
         try:
             data = await self._get(client, "sys/global-settings")
             return data.get("hostname", self.host)
         except Exception as e:
-            logger.warning(f"[{self.host}] get_hostname failed: {e}. Fallback ke management IP.")
+            logger.warning(f"[{self.host}] get_hostname failed: {e}. Falling back to management IP.")
             return self.host
 
-    async def get_virtual_server_ips(self, client: httpx.AsyncClient) -> tuple[list[str], int]:
+    async def get_virtual_server_ip_ports(self, client: httpx.AsyncClient) -> tuple[list[dict], int]:
         """
-        Ambil semua IP Virtual Server, skip forwarding-ip.
-        Return: (list_ips, forwarding_skipped_count)
+        Read all Virtual Server IP + port records and skip forwarding-ip records.
+        Returns (list_records, forwarding_skipped_count).
         """
         data = await self._get(
             client,
             "ltm/virtual?$select=name,destination,type,partition,ipForward,l2Forward&$top=5000"
         )
 
-        ips: list[str] = []
+        records: list[dict] = []
         skipped = 0
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
 
         for vs in data.get("items", []):
             if is_forwarding_virtual(vs):
@@ -217,17 +208,20 @@ class F5Client:
                 continue
 
             dest = vs.get("destination", "")
-            ip = extract_ip_from_destination(dest)
-            if ip and ip not in seen:
-                seen.add(ip)
-                ips.append(ip)
+            ip, port = extract_ip_port_from_value(dest)
+            key = (ip, port)
+            if ip and key not in seen:
+                seen.add(key)
+                records.append({"ip": ip, "port": port})
 
-        return ips, skipped
+        return records, skipped
+
+    async def get_virtual_server_ips(self, client: httpx.AsyncClient) -> tuple[list[str], int]:
+        records, skipped = await self.get_virtual_server_ip_ports(client)
+        return [record["ip"] for record in records], skipped
 
     async def get_node_ips(self, client: httpx.AsyncClient) -> list[str]:
-        """
-        Ambil semua IP Node dari /mgmt/tm/ltm/node.
-        """
+        """Read all Node IPs from /mgmt/tm/ltm/node."""
         data = await self._get(
             client,
             "ltm/node?$select=name,address,partition&$top=5000"
@@ -245,18 +239,55 @@ class F5Client:
 
         return ips
 
+    async def get_pool_member_ip_ports(self, client: httpx.AsyncClient) -> list[dict]:
+        """
+        Read unique IP + port records from all pool members using expandSubcollections.
+        FQDN pool members and members without IPv4 are skipped.
+        """
+        try:
+            pools_data = await self._get(
+                client,
+                "ltm/pool?expandSubcollections=true&$select=name,partition,membersReference&$top=5000",
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{self.host}] get_pool_member_ips with expandSubcollections failed: {e}. "
+                "Falling back to manual per-pool fetch."
+            )
+            return await self._get_pool_member_ip_ports_fallback(client)
+
+        records: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        for pool in pools_data.get("items", []):
+            members_ref = pool.get("membersReference", {})
+            members = members_ref.get("items", [])
+            for member in members:
+                ip, parsed_port = extract_ip_port_from_value(member.get("address", ""))
+                if not ip:
+                    ip, parsed_port = extract_ip_port_from_value(member.get("name", ""))
+
+                port = _clean_port(member.get("port")) or parsed_port
+                key = (ip, port)
+                if ip and key not in seen:
+                    seen.add(key)
+                    records.append({"ip": ip, "port": port})
+
+        return records
+
     async def get_pool_member_ips(self, client: httpx.AsyncClient) -> list[str]:
-        """
-        Ambil IP unik dari semua pool member.
-        Pool member FQDN atau member tanpa IPv4 dilewati.
-        """
+        records = await self.get_pool_member_ip_ports(client)
+        return [record["ip"] for record in records]
+
+    async def _get_pool_member_ip_ports_fallback(self, client: httpx.AsyncClient) -> list[dict]:
+        """Fetch pool member IP + port records manually with one request per pool."""
         pools_data = await self._get(
             client,
             "ltm/pool?$select=name,partition,fullPath&$top=5000",
         )
 
-        ips: list[str] = []
-        seen: set[str] = set()
+        records: list[dict] = []
+        seen: set[tuple[str, str]] = set()
 
         sem = asyncio.Semaphore(10)
 
@@ -269,7 +300,7 @@ class F5Client:
             pool_name_encoded = name.replace("/", "~")
             path = (
                 f"ltm/pool/~{partition}~{pool_name_encoded}/members"
-                "?$select=name,address,partition&$top=5000"
+                "?$select=name,address,partition,port&$top=5000"
             )
             try:
                 async with sem:
@@ -285,20 +316,20 @@ class F5Client:
 
         for members in member_groups:
             for member in members:
-                ip = (
-                    extract_ip_from_address(member.get("address", ""))
-                    or extract_ip_from_address(member.get("name", ""))
-                )
-                if ip and ip not in seen:
-                    seen.add(ip)
-                    ips.append(ip)
+                ip, parsed_port = extract_ip_port_from_value(member.get("address", ""))
+                if not ip:
+                    ip, parsed_port = extract_ip_port_from_value(member.get("name", ""))
 
-        return ips
+                port = _clean_port(member.get("port")) or parsed_port
+                key = (ip, port)
+                if ip and key not in seen:
+                    seen.add(key)
+                    records.append({"ip": ip, "port": port})
+
+        return records
 
     async def get_self_ips(self, client: httpx.AsyncClient) -> list[str]:
-        """
-        Ambil IP unik dari Self IP (/mgmt/tm/net/self).
-        """
+        """Read unique Self IP records from /mgmt/tm/net/self."""
         data = await self._get(
             client,
             "net/self?$select=name,address,partition&$top=5000",

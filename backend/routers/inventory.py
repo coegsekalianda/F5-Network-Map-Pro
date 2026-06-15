@@ -1,5 +1,5 @@
 """
-Endpoint search, export, dan manajemen inventory IP.
+Inventory IP search, export, and management endpoints.
 """
 import io
 import zipfile
@@ -19,6 +19,7 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 EXPORT_COLUMNS = (
     ("hostname", "Hostname"),
     ("ip", "IP"),
+    ("port", "Port"),
     ("type", "Type"),
 )
 
@@ -29,6 +30,20 @@ def _format_export_value(value) -> str:
     if value == "VS":
         return "Virtual Server"
     return str(value)
+
+
+def _parse_ip_port_query(value: str) -> tuple[str, Optional[str]]:
+    value = value.strip()
+    if ":" not in value:
+        return value, None
+
+    ip, port = value.rsplit(":", 1)
+    ip = ip.strip()
+    port = port.strip()
+    if not ip or not port:
+        return value, None
+
+    return ip, port
 
 
 def _safe_filename_part(value: str) -> str:
@@ -46,10 +61,13 @@ async def _inventory_export_rows(
     if device_id is not None:
         filters.append(
             """
-            inv.hostname = (
+            (
+                inv.device_id = :device_id
+                OR inv.hostname = (
                 SELECT hostname
                 FROM devices
                 WHERE id = :device_id
+                )
             )
             """
         )
@@ -62,6 +80,7 @@ async def _inventory_export_rows(
             SELECT
                 inv.hostname AS hostname,
                 inv.ip AS ip,
+                inv.port AS port,
                 inv.type AS type
             FROM inventory_ip inv
             {where_clause}
@@ -108,7 +127,8 @@ def _xlsx_response(rows, filename: str) -> Response:
   <cols>
     <col min="1" max="1" width="24" customWidth="1"/>
     <col min="2" max="2" width="18" customWidth="1"/>
-    <col min="3" max="3" width="16" customWidth="1"/>
+    <col min="3" max="3" width="10" customWidth="1"/>
+    <col min="4" max="4" width="16" customWidth="1"/>
   </cols>
   <sheetData>
     {''.join(sheet_rows)}
@@ -173,14 +193,29 @@ async def search_inventory(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Cari IP di inventory database (exact match).
-    Tidak login ke F5, hanya baca database lokal.
+    Search IP records in the inventory database using an exact match.
+    This reads only the local database and does not log in to F5.
     """
     ip = ip.strip()
-    result = await db.execute(
-        text("SELECT * FROM inventory_ip WHERE ip = :ip ORDER BY hostname, type"),
-        {"ip": ip},
-    )
+    query_ip, query_port = _parse_ip_port_query(ip)
+    if query_port is not None:
+        result = await db.execute(
+            text(
+                """
+                SELECT *
+                FROM inventory_ip
+                WHERE ip = :ip
+                  AND port = :port
+                ORDER BY hostname, type, port
+                """
+            ),
+            {"ip": query_ip, "port": query_port},
+        )
+    else:
+        result = await db.execute(
+            text("SELECT * FROM inventory_ip WHERE ip = :ip ORDER BY hostname, type, port"),
+            {"ip": query_ip},
+        )
     rows = result.mappings().all()
     items = [InventoryIPOut.model_validate(dict(row)) for row in rows]
     return InventorySearchResult(ip=ip, results=items)
@@ -193,27 +228,27 @@ async def get_all_inventory(
     skip: int = 0,
     limit: int = 2000,
 ):
-    """Ambil data inventory, opsional filter by device_id."""
+    """Return inventory data, optionally filtered by device_id."""
     if device_id is not None:
         dev_res = await db.execute(
             text("SELECT hostname FROM devices WHERE id = :device_id"),
             {"device_id": device_id},
         )
         dev = dev_res.mappings().first()
-        if not dev or not dev["hostname"]:
+        if not dev:
             return []
 
         result = await db.execute(
             text(
-                "SELECT * FROM inventory_ip WHERE hostname = :hostname "
-                "ORDER BY type, ip LIMIT :limit OFFSET :skip"
+                "SELECT * FROM inventory_ip WHERE device_id = :device_id OR hostname = :hostname "
+                "ORDER BY type, ip, port LIMIT :limit OFFSET :skip"
             ),
-            {"hostname": dev["hostname"], "limit": limit, "skip": skip},
+            {"device_id": device_id, "hostname": dev["hostname"] or "", "limit": limit, "skip": skip},
         )
     else:
         result = await db.execute(
             text(
-                "SELECT * FROM inventory_ip ORDER BY hostname, type, ip "
+                "SELECT * FROM inventory_ip ORDER BY hostname, type, ip, port "
                 "LIMIT :limit OFFSET :skip"
             ),
             {"limit": limit, "skip": skip},
@@ -227,7 +262,7 @@ async def export_inventory_xlsx(
     device_id: Optional[int] = Query(None, description="Filter by device ID"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Export inventory ke XLSX, opsional filter by device_id."""
+    """Export inventory to XLSX, optionally filtered by device_id."""
     rows = await _inventory_export_rows(db, device_id=device_id)
     scope = await _export_scope_name(db, device_id)
     return _xlsx_response(rows, f"f5-inventory-{scope}.xlsx")
@@ -238,29 +273,29 @@ async def clear_inventory(
     device_id: Optional[int] = Query(None, description="Clear only for specific device ID"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Hapus data dari inventory_ip (semua atau berdasarkan device_id)."""
+    """Delete inventory_ip data for one device or all devices."""
     if device_id is not None:
         dev_res = await db.execute(
             text("SELECT hostname FROM devices WHERE id = :device_id"),
             {"device_id": device_id},
         )
         dev = dev_res.mappings().first()
-        if not dev or not dev["hostname"]:
+        if not dev:
             raise HTTPException(
                 status_code=404,
-                detail="Device tidak ditemukan atau belum pernah di-sync",
+                detail="Device not found",
             )
 
         await db.execute(
-            text("DELETE FROM inventory_ip WHERE hostname = :hostname"),
-            {"hostname": dev["hostname"]},
+            text("DELETE FROM inventory_ip WHERE device_id = :device_id OR hostname = :hostname"),
+            {"device_id": device_id, "hostname": dev["hostname"] or ""},
         )
         await db.commit()
         return {
             "ok": True,
-            "message": f"Inventory untuk device '{dev['hostname']}' berhasil dikosongkan",
+            "message": f"Inventory for device '{dev['hostname']}' was cleared",
         }
 
     await db.execute(text("DELETE FROM inventory_ip"))
     await db.commit()
-    return {"ok": True, "message": "Semua data inventory berhasil dikosongkan"}
+    return {"ok": True, "message": "All inventory data was cleared"}

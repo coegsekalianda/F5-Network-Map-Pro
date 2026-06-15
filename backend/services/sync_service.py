@@ -1,18 +1,18 @@
 """
-services/sync_service.py — Orchestrator untuk sync semua / satu device F5.
+Sync orchestration for all devices or one F5 device.
 
-Flow Sync All:
-  1. Ambil semua device enabled dari DB
-  2. Sync 5 device sekaligus (semaphore)
-  3. Tiap device:
-     a. Decrypt password
-     b. F5Client: get_hostname, get_virtual_server_ips, get_pool_member_ips, get_self_ips
-     c. Upsert ke inventory_ip
-     d. Update last_sync, last_status di devices
-  4. Return SyncResult summary
+Sync All flow:
+  1. Read all enabled devices from the database.
+  2. Sync up to SYNC_CONCURRENCY devices at the same time.
+  3. For each device:
+     a. Decrypt the password.
+     b. Fetch hostname, Virtual Server IPs, Pool Member IPs, and Self IPs.
+     c. Upsert inventory_ip records.
+     d. Update devices.last_sync and devices.last_status.
+  4. Return a SyncResult summary.
 
 Upsert:
-  INSERT ... ON CONFLICT(hostname, ip, type) DO UPDATE SET last_seen = ...
+  INSERT ... ON CONFLICT(hostname, ip, port, type) DO UPDATE SET last_seen = ...
 """
 import asyncio
 import logging
@@ -23,37 +23,42 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..crypto import decrypt_password
-from ..models import Device, InventoryIP
-from ..schemas import SyncResult, SyncDeviceResult, SyncDeviceError
+from ..models import Device
+from ..schemas import SyncDeviceError, SyncDeviceResult, SyncResult
 from .f5_client import F5Client
 
 logger = logging.getLogger(__name__)
 
-SYNC_CONCURRENCY = 5  # max device yang di-sync bersamaan
+# SQLite WAL mode and early commits allow concurrent F5 network requests.
+# Database writes are serialized using _DB_WRITE_LOCK to prevent "database is locked".
+SYNC_CONCURRENCY = 5
+
+_DB_WRITE_LOCK = asyncio.Lock()
 
 
 async def _upsert_ip(
     db: AsyncSession,
+    device_id: int,
     hostname: str,
     ip: str,
+    port: str,
     ip_type: str,
 ) -> None:
-    """
-    Upsert satu record ke inventory_ip.
-    Gunakan raw SQL untuk mendukung ON CONFLICT SQLite.
-    """
+    """Upsert one inventory_ip record using raw SQL for SQLite ON CONFLICT support."""
     await db.execute(
         text(
             """
-            INSERT INTO inventory_ip (hostname, ip, type, last_seen)
-            VALUES (:hostname, :ip, :type, :now)
-            ON CONFLICT(hostname, ip, type)
-            DO UPDATE SET last_seen = :now
+            INSERT INTO inventory_ip (device_id, hostname, ip, port, type, last_seen)
+            VALUES (:device_id, :hostname, :ip, :port, :type, :now)
+            ON CONFLICT(hostname, ip, port, type)
+            DO UPDATE SET device_id = :device_id, last_seen = :now
             """
         ),
         {
+            "device_id": device_id,
             "hostname": hostname,
             "ip": ip,
+            "port": port or "",
             "type": ip_type,
             "now": datetime.now(timezone.utc),
         },
@@ -64,7 +69,7 @@ async def sync_one_device(
     db: AsyncSession,
     device: Device,
 ) -> SyncDeviceResult:
-    """Sync satu device F5, return SyncDeviceResult."""
+    """Sync one F5 device and return a SyncDeviceResult."""
     result = SyncDeviceResult(
         device_id=device.id,
         name=device.name,
@@ -75,8 +80,9 @@ async def sync_one_device(
     try:
         password = decrypt_password(device.password_encrypted)
     except Exception as e:
-        result.error = f"Gagal decrypt password: {e}"
-        await _update_device_status(db, device.id, "FAILED", result.error)
+        result.error = f"Failed to decrypt password: {e}"
+        async with _DB_WRITE_LOCK:
+            await _update_device_status(db, device.id, "FAILED", result.error)
         return result
 
     client_obj = F5Client(
@@ -92,43 +98,48 @@ async def sync_one_device(
             verify=device.verify_ssl,
             timeout=15.0,
         ) as http_client:
-            # 1. Ambil hostname
             hostname = await client_obj.get_hostname(http_client)
             result.hostname = hostname
 
-            # 2. Ambil VS IPs
-            vs_ips, fwd_skipped = await client_obj.get_virtual_server_ips(http_client)
+            vs_records, fwd_skipped = await client_obj.get_virtual_server_ip_ports(http_client)
             result.forwarding_vs_skipped = fwd_skipped
 
-            # Hapus data inventory lama untuk hostname ini agar data lama/forwarding VS terhapus
+            pool_member_records = await client_obj.get_pool_member_ip_ports(http_client)
+            self_ips = await client_obj.get_self_ips(http_client)
+
+        async with _DB_WRITE_LOCK:
             await db.execute(
-                text("DELETE FROM inventory_ip WHERE hostname = :hostname"),
-                {"hostname": hostname}
+                text(
+                    """
+                    DELETE FROM inventory_ip
+                    WHERE device_id = :device_id
+                       OR hostname = :hostname
+                    """
+                ),
+                {"device_id": device.id, "hostname": hostname}
             )
 
-            for ip in vs_ips:
-                await _upsert_ip(db, hostname, ip, "VS")
-            result.vs_ip_synced = len(vs_ips)
+            for item in vs_records:
+                await _upsert_ip(db, device.id, hostname, item["ip"], item.get("port", ""), "VS")
+            result.vs_ip_synced = len(vs_records)
 
-            # 3. Ambil Pool Member IPs
-            pool_member_ips = await client_obj.get_pool_member_ips(http_client)
-            for ip in pool_member_ips:
-                await _upsert_ip(db, hostname, ip, "POOL_MEMBER")
-            result.pool_member_ip_synced = len(pool_member_ips)
-            result.node_ip_synced = len(pool_member_ips)
+            for item in pool_member_records:
+                await _upsert_ip(db, device.id, hostname, item["ip"], item.get("port", ""), "POOL_MEMBER")
+            result.pool_member_ip_synced = len(pool_member_records)
+            result.node_ip_synced = len(pool_member_records)
 
-            # 4. Ambil Self IPs
-            self_ips = await client_obj.get_self_ips(http_client)
             for ip in self_ips:
-                await _upsert_ip(db, hostname, ip, "SELF_IP")
+                await _upsert_ip(db, device.id, hostname, ip, "", "SELF_IP")
             result.self_ip_synced = len(self_ips)
 
-        await db.commit()
-        result.status = "OK"
-        await _update_device_status(db, device.id, "OK", None, hostname)
+            await db.commit()
+
+            result.status = "OK"
+            await _update_device_status(db, device.id, "OK", None, hostname)
+
         logger.info(
-            f"[{device.name}] sync OK: {len(vs_ips)} VS, "
-            f"{len(pool_member_ips)} POOL_MEMBER, {len(self_ips)} SELF_IP, "
+            f"[{device.name}] sync OK: {len(vs_records)} VS, "
+            f"{len(pool_member_records)} POOL_MEMBER, {len(self_ips)} SELF_IP, "
             f"{fwd_skipped} forwarding skipped"
         )
 
@@ -136,7 +147,8 @@ async def sync_one_device(
         await db.rollback()
         result.error = str(e)[:500]
         logger.warning(f"[{device.name}] sync FAILED: {e}")
-        await _update_device_status(db, device.id, "FAILED", result.error)
+        async with _DB_WRITE_LOCK:
+            await _update_device_status(db, device.id, "FAILED", result.error)
 
     return result
 
@@ -174,11 +186,12 @@ async def _update_device_status(
 
 
 async def sync_all_devices(db: AsyncSession) -> SyncResult:
-    """Sync semua device yang enabled, maksimal SYNC_CONCURRENCY bersamaan."""
+    """Sync all enabled devices with SYNC_CONCURRENCY parallel tasks."""
     result_devices = await db.execute(
         text("SELECT * FROM devices WHERE enabled = 1")
     )
     devices = result_devices.mappings().all()
+    await db.commit()
 
     if not devices:
         return SyncResult(
@@ -187,6 +200,8 @@ async def sync_all_devices(db: AsyncSession) -> SyncResult:
             failed=0,
             vs_ip_synced=0,
             node_ip_synced=0,
+            pool_member_ip_synced=0,
+            self_ip_synced=0,
             forwarding_vs_skipped=0,
             errors=[],
         )
@@ -195,8 +210,8 @@ async def sync_all_devices(db: AsyncSession) -> SyncResult:
 
     async def guarded_sync(device_row):
         async with sem:
-            # Buat session terpisah per device agar tidak conflict
             from ..database import AsyncSessionLocal
+
             async with AsyncSessionLocal() as dev_db:
                 device = Device(
                     id=device_row["id"],

@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>F5 Network Map Pro</title>
-<meta name="description" content="F5 Network Map Pro for BIG-IP topology and inventory management. Search Virtual Server, Pool Member, Self IP, and manage F5 inventory across multiple devices."/>
-<link rel="stylesheet" href="/static/css/app.css?v=17"/>
+<meta name="description" content="F5 Network Map Pro for BIG-IP topology search, monitoring, and F5 device management."/>
+<link rel="stylesheet" href="/static/css/app.css?v=20"/>
 </head>
 <body>
 <div id="app">
@@ -36,7 +36,7 @@
           <input
             id="inp-host"
             class="inp mono"
-            placeholder="Pilih device..."
+            placeholder="Select device..."
             list="device-list"
             autocomplete="off"
           >
@@ -52,14 +52,9 @@
       <section class="panel">
         <div class="panel-label">Search</div>
         <div class="field-group">
-          <input type="text" id="inp-ip" class="inp mono" placeholder="Nama VS/Pool atau IP..."/>
+          <input type="text" id="inp-ip" class="inp mono" placeholder="VS/Pool name or IP..."/>
           <button class="btn btn-primary" onclick="doSearch()">Search</button>
         </div>
-      </section>
-
-      <section class="panel" id="panel-health" style="display:none">
-        <div class="panel-label">Summary</div>
-        <div id="health-grid" class="health-grid"></div>
       </section>
 
       <section class="panel" id="panel-export" style="display:none">
@@ -79,11 +74,14 @@
           <button class="btn btn-primary" onclick="showDeviceForm(null)">+ Add Device</button>
           <button class="btn" onclick="openMonitoringPage()">Monitoring</button>
         </div>
+        <div class="field-group" style="margin-top:6px">
+          <button class="btn btn-warn" id="btn-bulk-password" onclick="showBulkPasswordModal()">Update Password Device</button>
+        </div>
       </section>
       <section class="panel">
         <div class="panel-label">Sync</div>
         <div class="field-group">
-          <button class="btn btn-primary" id="btn-sync-all" onclick="syncAll()">⟳ Sync All</button>
+          <button class="btn btn-primary" id="btn-sync-all" onclick="syncAll()">Sync All</button>
         </div>
       </section>
     </div>
@@ -93,18 +91,8 @@
       <section class="panel">
         <div class="panel-label">Search IP</div>
         <div class="field-group">
-          <input type="text" id="inv-search-ip" class="inp mono" placeholder="Masukkan IP..."/>
+          <input type="text" id="inv-search-ip" class="inp mono" placeholder="Enter IP or IP:port..."/>
           <button class="btn btn-primary" onclick="searchInventory()">Search</button>
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-label">Device Inventory</div>
-        <div class="field-group">
-          <input id="inv-device-select" class="inp mono" list="inv-device-list" placeholder="Hostname..." autocomplete="off" style="background: #2a2b36; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 6px; margin-bottom: 8px; width: 100%;"/>
-          <datalist id="inv-device-list"></datalist>
-          <button class="btn btn-primary" onclick="loadInventoryForSelected()" style="margin-bottom: 4px;">Load Inventory</button>
-          <button class="btn btn-danger btn-clear-selected" onclick="clearInventoryForSelected()">Clear Selected Inventory</button>
-          <button class="btn btn-clear-all clear-all-inventory-btn" onclick="clearAllInventory()">Clear All Inventory</button>
         </div>
       </section>
       <section class="panel">
@@ -136,7 +124,6 @@
       <section class="panel">
         <div class="panel-label">Dashboard</div>
         <div class="field-group">
-          <label class="check-row"><input type="checkbox" id="mon-combined-toggle" onchange="setMonitoringCombined(this.checked)"/> Combined chart</label>
           <button class="btn" onclick="saveMonitoringDashboard()">Save Dashboard</button>
           <button class="btn" onclick="loadMonitoringDashboard()">Load Dashboard</button>
           <button class="btn btn-danger" onclick="clearMonitoringDashboard()">Clear Dashboard</button>
@@ -149,7 +136,7 @@
   <main id="main">
     <div id="topbar">
       <div class="status-area">
-        <span id="status-msg" class="status-msg">Hubungkan ke F5, lalu masukkan IP.</span>
+        <span id="status-msg" class="status-msg">Connect to F5, then enter an IP.</span>
         <button id="btn-cancel-search" class="btn btn-sm btn-cancel-search" onclick="cancelSearch()" style="display:none">Cancel</button>
       </div>
       <div id="bulk-header-container" class="bulk-header-container">
@@ -168,7 +155,7 @@
       <div id="tree-container">
         <div id="tree-empty" class="tree-empty">
           <div class="empty-icon">O</div>
-          <div class="empty-text">Hasil pencarian akan tampil di sini</div>
+          <div class="empty-text">Search results will appear here</div>
         </div>
         <div id="tree-root"></div>
       </div>
@@ -178,13 +165,13 @@
     <div id="page-devices" style="display:none" class="inv-page">
       <div class="inv-page-header">
         <h1 class="inv-page-title">Device Management</h1>
-        <p class="inv-page-desc">Kelola daftar perangkat F5 BIG-IP yang akan di-sync ke inventory.</p>
+        <p class="inv-page-desc">Manage F5 BIG-IP devices used for topology and monitoring.</p>
       </div>
 
       <!-- Device Form (hidden by default) -->
       <div id="device-form-wrap" class="device-form-wrap" style="display:none">
         <div class="device-form">
-          <div class="device-form-title" id="device-form-title">Tambah Device</div>
+          <div class="device-form-title" id="device-form-title">Add Device</div>
           <input type="hidden" id="device-form-id"/>
           <div class="form-grid">
             <div class="form-field">
@@ -201,7 +188,7 @@
             </div>
             <div class="form-field">
               <label class="form-label">Password</label>
-              <input type="password" id="dform-pass" class="inp" placeholder="Kosongkan jika tidak ingin mengubah"/>
+              <input type="password" id="dform-pass" class="inp" placeholder="Leave blank to keep unchanged"/>
             </div>
             <div class="form-field form-field-inline">
               <label class="check-row">
@@ -245,39 +232,12 @@
     <div id="page-inventory" style="display:none" class="inv-page">
       <div class="inv-page-header">
         <h1 class="inv-page-title">IP Inventory</h1>
-        <p class="inv-page-desc">Cari IP Virtual Server, Pool Member, atau Self IP dari database inventory F5.</p>
+        <p class="inv-page-desc">Search IP or IP:port from the local F5 inventory database.</p>
       </div>
 
-
-
-      <!-- Search Result -->
       <div id="inv-search-result" class="inv-search-result" style="display:none">
         <div class="inv-search-result-title" id="inv-search-label"></div>
         <div id="inv-search-table-wrap"></div>
-      </div>
-
-      <!-- All Inventory Table -->
-      <div id="inv-all-wrap" style="display:none">
-        <div class="inv-table-wrap">
-          <div class="inv-table-header">
-            <span class="inv-table-title" id="inv-table-title">Inventory Device</span>
-            <span id="inv-all-count" class="inv-count-badge"></span>
-          </div>
-          <table class="inv-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Hostname</th>
-                <th>IP</th>
-                <th>Type</th>
-                <th>Last Seen</th>
-              </tr>
-            </thead>
-            <tbody id="inv-all-tbody">
-              <tr><td colspan="5" class="inv-empty">Klik "Load Inventory" untuk memuat data.</td></tr>
-            </tbody>
-          </table>
-        </div>
       </div>
     </div>
 
@@ -285,22 +245,11 @@
     <div id="page-monitoring" style="display:none" class="inv-page monitoring-page">
       <div class="inv-page-header">
         <h1 class="inv-page-title">VS Connection Monitor</h1>
-        <p class="inv-page-desc">Realtime connection dashboard untuk beberapa Virtual Server dari beberapa device F5.</p>
+        <p class="inv-page-desc">Realtime connection dashboard for multiple Virtual Servers across F5 devices.</p>
       </div>
       <div id="monitoring-empty" class="tree-empty monitoring-empty">
         <div class="empty-icon">M</div>
-        <div class="empty-text">Tambahkan target monitoring dari sidebar</div>
-      </div>
-      <div id="monitoring-combined-wrap" class="monitor-combined-wrap" style="display:none">
-        <div class="monitor-card monitor-combined-card">
-          <div class="monitor-card-head">
-            <div>
-              <div class="monitor-card-title">Combined Current Connections</div>
-              <div class="monitor-card-sub">Perbandingan semua target</div>
-            </div>
-          </div>
-          <canvas id="monitoring-combined-chart" class="monitor-chart"></canvas>
-        </div>
+        <div class="empty-text">Add monitoring targets from the sidebar</div>
       </div>
       <div id="monitoring-grid" class="monitor-grid"></div>
     </div>
@@ -308,9 +257,39 @@
     <div id="toast" class="toast hidden"></div>
   </main>
 
+  <!-- BULK PASSWORD MODAL -->
+  <div id="bulk-password-modal" class="bulk-modal-overlay" style="display:none" onclick="hideBulkPasswordModal(event)">
+    <div class="bulk-modal">
+      <div class="bulk-modal-header">
+        <span class="bulk-modal-title">Update Device Passwords</span>
+        <button class="bulk-modal-close" onclick="hideBulkPasswordModal()">✕</button>
+      </div>
+      <div class="bulk-modal-body">
+        <p class="bulk-modal-desc">Enter the new password. All selected devices will be updated at once.</p>
+        <div class="bulk-modal-targets" id="bulk-pwd-targets">
+          <!-- Device checkboxes render here -->
+        </div>
+        <div class="bulk-modal-field">
+          <label class="form-label">New Password</label>
+          <div class="bulk-pass-row">
+            <input type="password" id="bulk-pwd-input" class="inp" placeholder="Enter new password..." autocomplete="new-password"/>
+            <button class="btn btn-sm" id="bulk-pwd-toggle" onclick="toggleBulkPassVis()" title="Show/Hide">👁</button>
+          </div>
+        </div>
+        <div id="bulk-pwd-status" class="dform-status" style="margin-top:8px"></div>
+      </div>
+      <div class="bulk-modal-footer">
+        <button class="btn" onclick="selectAllBulkDevices(true)">Select All</button>
+        <button class="btn" onclick="selectAllBulkDevices(false)">Clear Selection</button>
+        <button class="btn btn-primary" id="bulk-pwd-save-btn" onclick="saveBulkPassword()">Update Password</button>
+        <button class="btn" onclick="hideBulkPasswordModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
 </div>
-<script src="/static/js/app.js?v=10"></script>
-<script src="/static/js/inventory.js?v=16"></script>
-<script src="/static/js/monitoring.js?v=10"></script>
+<script src="/static/js/app.js?v=12"></script>
+<script src="/static/js/inventory.js?v=23"></script>
+<script src="/static/js/monitoring.js?v=14"></script>
 </body>
 </html>

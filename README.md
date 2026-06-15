@@ -1,93 +1,94 @@
 # F5 Network Map Pro
 
-Web app untuk memetakan topologi F5 BIG-IP dan mengelola inventory IP lintas device. Aplikasi ini membaca data melalui iControl REST, menampilkan relasi Virtual Server -> Pool -> Pool Member, serta menyediakan database inventory lokal berbasis SQLite.
+Web application for F5 BIG-IP topology search, device management, local IP inventory lookup, and Virtual Server connection monitoring. The app reads BIG-IP data through iControl REST, renders Virtual Server -> Pool -> Pool Member relationships, and stores local inventory data in SQLite for fast lookup.
 
-## Fitur Utama
+## Key Features
 
-- Search topologi berdasarkan nama Virtual Server, nama Pool, destination IP, atau IP Pool Member.
-- Tampilan tree interaktif untuk Virtual Server, Pool, Pool Member, iRule, profile, TLS version, status, dan connection count.
-- Action operasional dari UI:
+- Topology search by Virtual Server name, Pool name, destination IP, IP:port, or Pool Member IP.
+- Interactive tree for Virtual Servers, Pools, Pool Members, iRules, status, and connection counts.
+- Virtual Server profile and TLS details are loaded only when the popup is opened.
+- Pool current connections are refreshed when the Pool popup is opened.
+- Operational actions from the UI:
   - enable / disable Virtual Server
   - enable / force-offline Pool Member
   - bulk enable / force-offline Pool Member
-  - cek dan clear active connection pada Pool
-- Export hasil topologi ke PNG dan PDF.
-- Device Management untuk menyimpan daftar F5 BIG-IP.
-- Sync inventory dari banyak device ke database lokal.
-- Search inventory IP untuk tipe `Virtual Server`, `POOL_MEMBER`, dan `SELF_IP`.
-- Export inventory ke XLSX untuk semua device atau device tertentu berdasarkan hostname.
-- Monitoring realtime connection beberapa Virtual Server dari beberapa device F5 dalam satu dashboard.
-- Password device disimpan terenkripsi menggunakan `SECRET_KEY`.
+- Export topology results to PNG and PDF.
+- Device Management for saved F5 BIG-IP devices.
+- Sync inventory from one device or all enabled devices.
+- Sync stores IP and port for Virtual Servers and Pool Members.
+- Deleting a device also deletes local inventory owned by that device.
+- Realtime connection monitoring dashboard for multiple Virtual Servers across multiple F5 devices.
+- Device passwords are encrypted with `SECRET_KEY`.
 
 ## Stack
 
 - Backend: Python, FastAPI, SQLAlchemy async, SQLite, httpx
-- Frontend: HTML, CSS, JavaScript vanilla
+- Frontend: HTML, CSS, vanilla JavaScript
 - Database: `backend/inventory.db`
-- API F5: iControl REST (`/mgmt/tm/...`)
+- F5 API: iControl REST (`/mgmt/tm/...`)
 
-## Struktur Project
+## Project Structure
 
 ```text
 f5-network-map-pro/
 |-- backend/
-|   |-- main.py                 # FastAPI app dan endpoint topology
-|   |-- database.py             # SQLite async engine
-|   |-- models.py               # tabel devices dan inventory_ip
-|   |-- crypto.py               # enkripsi/dekripsi password device
+|   |-- main.py                   # FastAPI app and topology endpoints
+|   |-- database.py               # SQLite async engine and lightweight migrations
+|   |-- models.py                 # devices and inventory_ip tables
+|   |-- crypto.py                 # device password encryption/decryption
 |   |-- routers/
-|   |   |-- devices.py          # CRUD device
-|   |   |-- inventory.py        # search/clear/list inventory
-|   |   |-- monitoring.py       # endpoint monitoring connection VS
-|   |   `-- sync.py             # sync inventory device
+|   |   |-- devices.py            # device CRUD
+|   |   |-- inventory.py          # local inventory lookup/export/clear API
+|   |   |-- monitoring.py         # VS connection monitoring endpoints
+|   |   `-- sync.py               # device inventory sync endpoints
 |   |-- services/
-|   |   |-- f5_client.py        # client iControl REST
-|   |   |-- monitoring_service.py # logic polling stats VS
-|   |   `-- sync_service.py     # logic sync inventory
+|   |   |-- f5_client.py          # iControl REST client for sync
+|   |   |-- monitoring_service.py # VS stats polling logic
+|   |   `-- sync_service.py       # inventory sync logic
 |   `-- requirements.txt
 |-- frontend/
 |   |-- index.html
 |   `-- static/
 |       |-- css/app.css
 |       `-- js/
-|           |-- app.js          # topology UI
-|           |-- inventory.js    # devices dan inventory UI
-|           `-- monitoring.js   # monitoring connection UI
+|           |-- app.js            # topology UI
+|           |-- inventory.js      # devices and inventory UI
+|           `-- monitoring.js     # connection monitoring UI
 |-- run.sh
 `-- README.md
 ```
 
-## Prasyarat
+## Requirements
 
-- Python 3.9 atau lebih baru.
-- Akses jaringan dari server aplikasi ke management IP F5 BIG-IP port 443.
-- User F5 yang memiliki akses iControl REST untuk membaca konfigurasi LTM.
-- Untuk fitur action seperti enable/disable member atau clear connection, user F5 harus punya privilege yang sesuai.
+- Python 3.9 or newer.
+- Network access from the app server to F5 BIG-IP management IPs on port 443.
+- F5 user with iControl REST access for reading LTM configuration.
+- F5 user with the proper privileges for enable/disable actions.
 
 ## Setup
 
-1. Install dependency backend.
+1. Install backend dependencies.
 
 ```bash
 cd backend
 pip install -r requirements.txt
 ```
 
-2. Buat `backend/.env` untuk secret enkripsi password device.
+2. Create `backend/.env` for the device password encryption secret.
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Lalu isi file `backend/.env`:
+Then add the generated key:
 
 ```env
-SECRET_KEY=isi_dengan_key_yang_dihasilkan
+SECRET_KEY=your_generated_key
 ```
 
-Catatan: `SECRET_KEY` wajib ada untuk fitur Device Management karena password device akan dienkripsi sebelum disimpan.
+`SECRET_KEY` is required for Device Management. If it changes, old saved device passwords cannot be decrypted and must be entered again.
 
-## Menjalankan Aplikasi
+## Run
 
 ### Linux / macOS / WSL
 
@@ -102,105 +103,78 @@ cd backend
 python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Buka aplikasi di browser:
+Open:
 
 ```text
 http://localhost:8000
 ```
 
-Monitoring juga bisa dibuka langsung melalui:
+Monitoring is also available at:
 
 ```text
 http://localhost:8000/monitoring
 ```
 
-## Cara Pakai
+## Usage
 
 ### Topology
 
-1. Buka tab `Topology`.
-2. Pilih device dari field connection. Jika device sudah tersimpan di `Devices`, host, username, password, dan opsi SSL akan dimuat otomatis lalu aplikasi langsung login.
-3. Masukkan keyword pencarian:
-   - nama Virtual Server
-   - nama Pool
-   - destination IP, contoh `10.1.2.3`
-   - IP dan port, contoh `10.1.2.3:443`
-   - IP Pool Member
-4. Klik `Search`.
-5. Klik node Virtual Server, Pool, atau Member untuk melihat detail dan action yang tersedia.
-6. Gunakan `Export PNG` atau `Export PDF` jika perlu menyimpan hasil.
+1. Open the `Topology` tab.
+2. Select a device in the connection field. Saved devices automatically load host, username, password, and SSL settings, then login.
+3. Enter a search keyword:
+   - Virtual Server name
+   - Pool name
+   - destination IP, for example `10.1.2.3`
+   - IP and port, for example `10.1.2.3:443`
+   - Pool Member IP
+4. Click `Search`.
+5. Click a Virtual Server, Pool, or Member node to open its detail popup.
+6. Virtual Server profile and TLS data load when the Virtual Server popup opens.
+7. Pool current connections refresh when the Pool popup opens.
+8. Use `Export PNG` or `Export PDF` when needed.
 
 ### Devices
 
-1. Buka tab `Devices`.
-2. Klik `Add Device`.
-3. Isi nama device, management IP, username, password, opsi SSL, dan status enabled.
-4. Simpan device.
-5. Gunakan `Test Connection` untuk validasi login.
-6. Klik `Sync` per device atau `Sync All` untuk menarik inventory dari F5.
-7. Klik tombol `Monitoring` untuk membuka dashboard monitoring di URL `/monitoring`.
+1. Open the `Devices` tab.
+2. Click `Add Device`.
+3. Fill in name, management IP, username, password, SSL option, and enabled status.
+4. Save the device.
+5. Use `Test Connection` to validate login.
+6. Click `Sync` per device or `Sync All` to pull inventory from F5.
+7. Device status changes to `SYNCING` as soon as sync starts.
+8. Click `Monitoring` to open `/monitoring`.
+9. Deleting a device also deletes its local inventory.
 
 ### Inventory
 
-1. Buka tab `Inventory`.
-2. Cari IP tertentu untuk melihat apakah IP tersebut muncul sebagai `Virtual Server`, `POOL_MEMBER`, atau `SELF_IP`.
-3. Pada `Device Inventory`, ketik atau pilih hostname device lalu klik `Load Inventory`.
-4. Pada `Export Inventory`, ketik atau pilih hostname device lalu klik `Export XLSX`.
-5. Untuk export semua device, pilih `All Devices` pada field export. Field kosong akan menampilkan error `Pilih device terlebih dahulu`.
-6. Gunakan tombol clear hanya jika ingin menghapus data inventory lokal. Ini tidak menghapus konfigurasi di F5.
+The `Inventory` tab supports IP/IP:port search and XLSX export. The old `Load Inventory`, `Clear Selected Inventory`, and `Clear All Inventory` buttons are no longer shown in the UI.
+
+Stored sync data:
+
+- `VS`: Virtual Server IP and port.
+- `POOL_MEMBER`: Pool Member IP and port.
+- `SELF_IP`: Self IP with an empty port.
+
+Lookup examples:
+
+- `GET /inventory/search?ip=10.1.2.3`
+- `GET /inventory/search?ip=10.1.2.3:443`
+
+Older data may have an empty port. Run device sync again to store port values.
 
 ### Monitoring
 
-1. Buka URL `/monitoring` atau klik tombol `Monitoring` dari menu `Devices`.
-2. Pada panel `VS Connection Monitor`, ketik atau pilih hostname device.
-3. Klik `Load Virtual Server` untuk memuat daftar Virtual Server dari device tersebut.
-4. Pilih Virtual Server, isi label custom jika perlu, lalu klik `Add VS Monitor`.
-5. Dashboard akan polling koneksi setiap 1 detik tanpa reload halaman.
-6. Gunakan `Combined chart` untuk membandingkan beberapa target dalam satu grafik.
-7. Gunakan `Save Dashboard` dan `Load Dashboard` untuk menyimpan daftar target di localStorage browser.
+1. Open `/monitoring` or click `Monitoring` from `Devices`.
+2. In `VS Connection Monitor`, type or select a device hostname.
+3. Click `Load Virtual Server`.
+4. Select a Virtual Server, optionally enter a custom label, then click `Add VS Monitor`.
+5. The dashboard polls connection data every second.
+6. Use `Save Dashboard` and `Load Dashboard` to store target lists in browser localStorage.
 
-Data realtime monitoring diambil langsung dari F5 iControl REST. Credential F5 tetap di backend; frontend hanya mengirim `device_id`, `partition`, dan `vs_name`.
+Realtime monitoring data is fetched directly from F5 iControl REST. F5 credentials stay on the backend; the frontend sends only `device_id`, `partition`, and `vs_name`.
 
-## Endpoint Penting
+## Cleanup Notes
 
-Topology:
+Generated files such as `__pycache__`, `*.pyc`, SQLite `*.db-shm`, and SQLite `*.db-wal` are not part of the source code. SQLite WAL/SHM files can appear while the server is running and are safe to remove only after the server is stopped.
 
-- `GET /` - frontend aplikasi
-- `GET /monitoring` - frontend aplikasi langsung membuka halaman Monitoring
-- `POST /api/test-connection` - test koneksi F5 langsung
-- `POST /api/health` - summary Virtual Server dan Pool
-- `POST /api/search-unified?q=...` - search topologi
-- `POST /api/vs-action` - enable/disable Virtual Server
-- `POST /api/member-action` - enable/force-offline satu Pool Member
-- `POST /api/member-action-bulk` - bulk action Pool Member
-- `POST /api/pool-connections` - cek koneksi Pool
-- `POST /api/clear-pool-connections` - clear koneksi server-side Pool
-
-Devices dan inventory:
-
-- `GET /devices` - list device
-- `POST /devices` - tambah device
-- `PUT /devices/{id}` - update device
-- `DELETE /devices/{id}` - hapus device
-- `POST /devices/{id}/test-connection` - test koneksi device tersimpan
-- `POST /sync/device/{id}` - sync satu device
-- `POST /sync/all` - sync semua device enabled
-- `GET /inventory/search?ip=...` - search inventory IP
-- `GET /inventory/all?device_id=...` - list inventory
-- `GET /inventory/export.xlsx?device_id=...` - export inventory XLSX; kosongkan `device_id` hanya untuk export semua device dari opsi `All Devices`
-- `DELETE /inventory/clear?device_id=...` - clear inventory lokal
-
-Monitoring:
-
-- `GET /api/monitoring/virtual-servers?device_id=...` - list Virtual Server untuk pilihan monitoring
-- `GET /api/monitoring/vs-connections?device_id=...&partition=Common&vs_name=...` - fetch stats connection satu Virtual Server
-- `POST /api/monitoring/vs-connections/batch` - fetch stats connection beberapa Virtual Server sekaligus
-
-## Catatan Operasional
-
-- Backend berjalan di port `8000`.
-- SSL verification default bernilai `false`, cocok untuk F5 dengan self-signed certificate. Aktifkan verify SSL jika certificate F5 valid dan trusted.
-- Fitur Topology memakai credential dari device tersimpan dan langsung login saat device dipilih.
-- Fitur Device Management menyimpan password terenkripsi di SQLite. Simpan `SECRET_KEY` dengan aman; jika key hilang, password lama tidak bisa didekripsi.
-- Database lokal berada di `backend/inventory.db`.
-- Jangan expose aplikasi ini ke internet publik tanpa autentikasi tambahan, segmentasi jaringan, dan kontrol akses yang jelas.
+Development-only benchmark scripts were removed from the repository. Source files, comments, docstrings, UI text, and backend-facing messages are kept in English.

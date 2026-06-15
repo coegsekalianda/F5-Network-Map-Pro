@@ -8,7 +8,6 @@ let monitorVirtualServers = [];
 let monitorTargets = [];
 let monitorPollTimer = null;
 let monitorPollInFlight = false;
-let monitorCombined = false;
 let monitorPageInitialized = false;
 
 function initMonitoringPage() {
@@ -55,7 +54,7 @@ async function loadMonitorDevices() {
     }
     if (input) input.placeholder = 'Device hostname...';
   } catch (e) {
-    invToast('Gagal memuat device monitoring: ' + e.message, 'err');
+    invToast('Failed to load monitoring devices: ' + e.message, 'err');
   }
 }
 
@@ -75,7 +74,7 @@ async function loadMonitorVirtualServers() {
   const list = document.getElementById('mon-vs-list');
   const input = document.getElementById('mon-vs-input');
   if (!device) {
-    invToast('Pilih device terlebih dahulu', 'err');
+    invToast('Select a device first', 'err');
     return;
   }
 
@@ -89,7 +88,7 @@ async function loadMonitorVirtualServers() {
     const r = await fetch(`${MONITOR_API}/api/monitoring/virtual-servers?device_id=${encodeURIComponent(device.id)}`);
     const data = await r.json();
     if (!r.ok || data.status !== 'ok') {
-      throw new Error(data.error || data.detail || 'Gagal memuat Virtual Server');
+      throw new Error(data.error || data.detail || 'Failed to load Virtual Server');
     }
 
     monitorVirtualServers = data.items || [];
@@ -100,10 +99,10 @@ async function loadMonitorVirtualServers() {
       }).join('');
     }
     if (input) input.placeholder = 'Virtual Server...';
-    invToast(`${monitorVirtualServers.length} Virtual Server dimuat`, 'ok');
+    invToast(`${monitorVirtualServers.length} Virtual Servers loaded`, 'ok');
   } catch (e) {
     if (input) input.placeholder = 'Virtual Server...';
-    invToast('Gagal memuat Virtual Server: ' + e.message, 'err');
+    invToast('Failed to load Virtual Server: ' + e.message, 'err');
   }
 }
 
@@ -124,11 +123,11 @@ function addMonitorTarget() {
   const labelInput = document.getElementById('mon-label-input');
 
   if (!device) {
-    invToast('Pilih device terlebih dahulu', 'err');
+    invToast('Select a device first', 'err');
     return;
   }
   if (!vs) {
-    invToast('Pilih Virtual Server terlebih dahulu', 'err');
+    invToast('Select a Virtual Server first', 'err');
     return;
   }
 
@@ -137,7 +136,7 @@ function addMonitorTarget() {
   const targetKey = `${device.id}|${vs.partition || 'Common'}|${vs.name}`;
 
   if (monitorTargets.some(target => target.key === targetKey)) {
-    invToast('Target sudah ada di dashboard', 'err');
+    invToast('Target already exists in the dashboard', 'err');
     return;
   }
 
@@ -187,7 +186,7 @@ function saveMonitoringDashboard() {
     ...target
   }) => target);
   localStorage.setItem(MONITOR_STORAGE_KEY, JSON.stringify(payload));
-  invToast('Dashboard monitoring disimpan', 'ok');
+  invToast('Monitoring dashboard saved', 'ok');
 }
 
 function loadMonitoringDashboard() {
@@ -207,19 +206,14 @@ function loadMonitoringDashboard() {
       }));
     renderMonitoringDashboard();
   } catch (e) {
-    invToast('Gagal load dashboard: ' + e.message, 'err');
+    invToast('Failed to load dashboard: ' + e.message, 'err');
   }
 }
 
 function clearMonitoringDashboard() {
-  if (!confirm('Hapus semua target monitoring?')) return;
+  if (!confirm('Clear all monitoring targets?')) return;
   monitorTargets = [];
   localStorage.removeItem(MONITOR_STORAGE_KEY);
-  renderMonitoringDashboard();
-}
-
-function setMonitoringCombined(enabled) {
-  monitorCombined = Boolean(enabled);
   renderMonitoringDashboard();
 }
 
@@ -293,15 +287,19 @@ function applyMonitoringResults(results) {
       result.connection_rate = Math.max(0, Math.round(deltaTotal / deltaSeconds));
     }
 
-    const point = {
-      ts: Date.now(),
-      current: result.current_connections,
-      rate: result.connection_rate,
-      total: result.total_connections,
-    };
-    target.points.push(point);
-    if (target.points.length > MONITOR_MAX_POINTS) {
-      target.points.splice(0, target.points.length - MONITOR_MAX_POINTS);
+    const nowMs = Date.now();
+    const shouldAddPoint = !previousPoint || (nowMs - previousPoint.ts >= 3000);
+    if (shouldAddPoint) {
+      const point = {
+        ts: nowMs,
+        current: result.current_connections,
+        rate: result.connection_rate,
+        total: result.total_connections,
+      };
+      target.points.push(point);
+      if (target.points.length > MONITOR_MAX_POINTS) {
+        target.points.splice(0, target.points.length - MONITOR_MAX_POINTS);
+      }
     }
   });
 
@@ -311,34 +309,15 @@ function applyMonitoringResults(results) {
 function renderMonitoringDashboard() {
   const grid = document.getElementById('monitoring-grid');
   const empty = document.getElementById('monitoring-empty');
-  const combinedWrap = document.getElementById('monitoring-combined-wrap');
   if (!grid || !empty) return;
 
   empty.style.display = monitorTargets.length ? 'none' : 'flex';
   grid.innerHTML = monitorTargets.map(renderMonitorCard).join('');
 
-  if (combinedWrap) {
-    combinedWrap.style.display = monitorTargets.length && monitorCombined ? 'block' : 'none';
-  }
-
   monitorTargets.forEach(target => {
     const canvas = document.getElementById(`monitor-chart-${target.id}`);
     if (canvas) drawLineChart(canvas, [{ label: target.label, points: target.points, color: MONITOR_COLORS[0] }]);
   });
-
-  if (monitorCombined) {
-    const canvas = document.getElementById('monitoring-combined-chart');
-    if (canvas) {
-      drawLineChart(
-        canvas,
-        monitorTargets.map((target, index) => ({
-          label: target.label,
-          points: target.points,
-          color: MONITOR_COLORS[index % MONITOR_COLORS.length],
-        })),
-      );
-    }
-  }
 }
 
 function renderMonitorCard(target) {
@@ -362,7 +341,6 @@ function renderMonitorCard(target) {
       </div>
       ${warnings ? `<div class="monitor-warning">${warnings}</div>` : ''}
       <canvas id="monitor-chart-${escAttr(target.id)}" class="monitor-chart"></canvas>
-      <div class="monitor-timestamp">${escHtml(formatMonitorTime(last.timestamp))}</div>
     </div>
   `;
 }
@@ -384,14 +362,14 @@ function monitorWarnings(target) {
   const prev = points[points.length - 2];
 
   if (last.status && last.status !== 'ok') {
-    warnings.push('Device tidak bisa diakses atau timeout');
+    warnings.push('Device is unreachable or timed out');
   }
   if (String(last.availability_state || '').toLowerCase() && String(last.availability_state || '').toLowerCase() !== 'available') {
     warnings.push('Virtual Server down / unavailable');
   }
   if (last.timestamp) {
     const age = Date.now() - new Date(last.timestamp).getTime();
-    if (age > 5000) warnings.push('Data tidak update lebih dari 5 detik');
+    if (age > 5000) warnings.push('Data has not updated for more than 5 seconds');
   }
 
   return warnings.map(escHtml).join('<br>');
@@ -400,7 +378,7 @@ function monitorWarnings(target) {
 function formatMetric(value) {
   if (value === null || value === undefined || value === '') return 'N/A';
   try {
-    return Number(value).toLocaleString('id-ID');
+    return Number(value).toLocaleString('en-US');
   } catch {
     return String(value);
   }
@@ -409,7 +387,7 @@ function formatMetric(value) {
 function formatMonitorTime(value) {
   if (!value) return 'N/A';
   try {
-    return new Date(value).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return new Date(value).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   } catch {
     return value;
   }
@@ -442,7 +420,10 @@ function drawLineChart(canvas, seriesList) {
 
   const minTs = Date.now() - 300000;
   const maxTs = Date.now();
-  const peakVal = Math.max(1, ...allPoints.map(point => Number(point.current || 0)));
+  // Y-axis follows the max of VISIBLE window data only — scales up and down
+  // as actual data changes, so the chart stays proportional at all times.
+  const visiblePoints = allPoints.filter(p => p.ts >= minTs);
+  const peakVal = Math.max(1, ...(visiblePoints.length ? visiblePoints : allPoints).map(p => Number(p.current || 0)));
   const maxVal = niceChartMax(peakVal);
 
   drawChartGrid(ctx, pad, plotW, plotH, maxVal, minTs, maxTs);
@@ -531,7 +512,7 @@ function drawChartGrid(ctx, pad, plotW, plotH, maxVal, minTs, maxTs) {
 }
 
 function formatAxisNumber(value) {
-  return Number(value).toLocaleString('id-ID');
+  return Number(value).toLocaleString('en-US');
 }
 
 function formatAxisTime(ts) {

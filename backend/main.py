@@ -101,6 +101,15 @@ class ClearPoolConnectionsRequest(BaseModel):
     pool_name: str
 
 
+class VSExtraRequest(BaseModel):
+    host: str
+    username: str
+    password: str
+    verify_ssl: bool = False
+    partition: str
+    vs_name: str
+
+
 def get_headers(cfg: F5Config) -> dict:
     creds = base64.b64encode(f"{cfg.username}:{cfg.password}".encode()).decode()
     return {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
@@ -837,6 +846,7 @@ async def _extract_vs_extra(
     partition: str,
     profile_resolver: ProfileTypeResolver = None,
     include_tls: bool = True,
+    include_profiles: bool = True,
 ):
     rules = []
     for r in vs_data.get("rules", []):
@@ -844,6 +854,9 @@ async def _extract_vs_extra(
             rules.append(r.split("/")[-1])
 
     profiles = []
+    if not include_profiles:
+        return rules, profiles
+
     prof_ref = vs_data.get("profilesReference", {})
     for p in prof_ref.get("items", []):
         p_name = _profile_leaf_name(p)
@@ -879,10 +892,12 @@ async def fetch_vs_extra_rest(
     vs_name: str,
     client: httpx.AsyncClient = None,
     profile_resolver: ProfileTypeResolver = None,
+    include_tls: bool = True,
+    include_profiles: bool = True,
 ):
     """
-    Ambil iRule dan profiles menggunakan REST API (expandSubcollections=true)
-    tanpa menggunakan tmsh / bash.  Retry up to 2 times on transient failures.
+    Fetch iRules and profiles through REST API (expandSubcollections=true)
+    without using tmsh or bash. Retry up to 2 times on transient failures.
     """
     vs_name_encoded = vs_name.replace("/", "~")
     path = f"ltm/virtual/~{partition}~{vs_name_encoded}?expandSubcollections=true"
@@ -891,7 +906,13 @@ async def fetch_vs_extra_rest(
     for attempt in range(3):
         try:
             data = await f5_get(cfg, path, client=client)
-            return await _extract_vs_extra(data, partition, profile_resolver)
+            return await _extract_vs_extra(
+                data,
+                partition,
+                profile_resolver,
+                include_tls=include_tls,
+                include_profiles=include_profiles,
+            )
         except Exception as e:
             last_err = e
             if attempt < 2:
@@ -906,6 +927,8 @@ async def fetch_vs_extras_bulk(
     vs_keys: set,
     client: httpx.AsyncClient = None,
     profile_resolver: ProfileTypeResolver = None,
+    include_tls: bool = True,
+    include_profiles: bool = True,
 ) -> dict:
     if not vs_keys:
         return {}
@@ -929,7 +952,13 @@ async def fetch_vs_extras_bulk(
             continue
 
         try:
-            extras[key] = await _extract_vs_extra(vs, partition, profile_resolver, include_tls=False)
+            extras[key] = await _extract_vs_extra(
+                vs,
+                partition,
+                profile_resolver,
+                include_tls=include_tls,
+                include_profiles=include_profiles,
+            )
         except Exception as e:
             logging.debug(f"Bulk VS extra parse failed for {key}: {e}")
             extras[key] = ([], [])
@@ -968,6 +997,8 @@ async def build_vs_result(
             vs_name,
             client=client,
             profile_resolver=profile_resolver,
+            include_tls=False,
+            include_profiles=False,
         )
 
     if pool_name:
@@ -1358,24 +1389,67 @@ async def search_unified(cfg: F5Config, q: str):
         ip_q, port_q = _parse_ip_port(q) if _looks_like_ip(q) else (q, None)
 
         async with httpx.AsyncClient(verify=cfg.verify_ssl, timeout=20.0) as client:
-            vs_data = await f5_get(
+            # Stage 1: Run initial network fetches in parallel
+            vs_task = f5_get(
                 cfg,
                 "ltm/virtual?$select=name,destination,partition,enabled,pool,description,ipProtocol,sourceAddressTranslation&$top=5000",
                 client=client
             )
+            pool_task = f5_get(
+                cfg,
+                "ltm/pool?$select=name,partition&$top=5000",
+                client=client
+            )
+            node_task = fetch_node_map(cfg, client=client)
+
+            member_task = None
+            if _looks_like_ip(q):
+                member_task = find_pools_by_member_tmsh(
+                    cfg,
+                    ip_q,
+                    port_q,
+                    client=client,
+                    suffix_ip=suffix_ip,
+                )
+
+            # Gather Stage 1
+            if member_task:
+                vs_res, pool_res, node_res, matches = await asyncio.gather(
+                    vs_task, pool_task, node_task, member_task, return_exceptions=True
+                )
+                if isinstance(matches, Exception):
+                    logging.warning(f"find_pools_by_member_tmsh failed: {matches}")
+                    matches = []
+            else:
+                vs_res, pool_res, node_res = await asyncio.gather(
+                    vs_task, pool_task, node_task, return_exceptions=True
+                )
+                matches = []
+
+            # Check core vs_data success
+            if isinstance(vs_res, Exception):
+                raise vs_res
+            vs_data = vs_res
+
+            # Check pool_data success
+            if isinstance(pool_res, Exception):
+                logging.debug(f"Failed to fetch pools: {pool_res}")
+                pool_data = {"items": []}
+            else:
+                pool_data = pool_res
+
+            # Check node_map success
+            node_map = node_res if not isinstance(node_res, Exception) else {}
 
             all_vs = vs_data.get("items", [])
             matched_vs_keys = set()
             member_pool_keys = set()
-
             pool_to_vs = {}
 
             for vs in all_vs:
                 pool_ref = vs.get("pool", "")
-            
                 if pool_ref:
                     pool_partition, pool_name = _pool_ref_parts(pool_ref, vs.get("partition", "Common"))
-            
                     key = f"{pool_partition}/{pool_name}"
                     pool_to_vs.setdefault(key, []).append(vs)
 
@@ -1386,22 +1460,14 @@ async def search_unified(cfg: F5Config, q: str):
                     matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
 
             # 2. Search by Pool name
-            try:
-                pool_data = await f5_get(
-                    cfg,
-                    "ltm/pool?$select=name,partition&$top=5000",
-                    client=client
-                )
-                all_pools = pool_data.get("items", [])
-                for p in all_pools:
-                    pool_name = p.get("name", "").lower()
-                    partition = p.get("partition", "Common")
-                    if q in pool_name:
-                        pkey = f"{partition}/{pool_name}"
-                        for vs in pool_to_vs.get(pkey, []):
-                            matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
-            except Exception as e_pool:
-                logging.debug(f"Failed to fetch pools for name search: {e_pool}")
+            all_pools = pool_data.get("items", [])
+            for p in all_pools:
+                pool_name = p.get("name", "").lower()
+                partition = p.get("partition", "Common")
+                if q in pool_name:
+                    pkey = f"{partition}/{pool_name}"
+                    for vs in pool_to_vs.get(pkey, []):
+                        matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
 
             # 3. Search by IP / Port (if matches IP pattern)
             if _looks_like_ip(q):
@@ -1419,18 +1485,7 @@ async def search_unified(cfg: F5Config, q: str):
                         else:
                             matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
 
-                try:
-                    matches = await find_pools_by_member_tmsh(
-                        cfg,
-                        ip_q,
-                        port_q,
-                        client=client,
-                        suffix_ip=suffix_ip,
-                    )
-                except Exception as e_tmsh:
-                    logging.warning(f"find_pools_by_member_tmsh failed: {e_tmsh}")
-                    matches = []
-
+                # Fallback to REST search if TMSH returned no results
                 if not matches:
                     try:
                         matches = await find_pools_by_member_rest(
@@ -1456,14 +1511,13 @@ async def search_unified(cfg: F5Config, q: str):
 
             if not matched_vs:
                 elapsed = round(time.time() - t0, 2)
-
                 return {
                     "vsList": [],
                     "q": q,
                     "searchType": "unified",
                     "elapsed": elapsed
                 }
-            node_map = await fetch_node_map(cfg, client=client)
+
             matched_pool_keys = set()
             matched_vs_key_set = set()
             for vs in matched_vs:
@@ -1478,27 +1532,49 @@ async def search_unified(cfg: F5Config, q: str):
                 if pool_name:
                     matched_pool_keys.add(f"{pool_partition}/{pool_name}")
 
-            pool_detail_map = None
-            if len(matched_pool_keys) > 1 or member_pool_keys:
-                pool_detail_map = await fetch_pool_details_bulk(
+            # Stage 2: Fetch pool details and VS extras in parallel
+            pool_detail_task = None
+            pools_to_fetch = matched_pool_keys or member_pool_keys
+            if pools_to_fetch:
+                pool_detail_task = fetch_pool_details_bulk(
                     cfg,
-                    matched_pool_keys or member_pool_keys,
+                    pools_to_fetch,
                     node_map=node_map,
                     client=client,
-                    fallback_missing=len(matched_pool_keys or member_pool_keys) <= 50,
+                    fallback_missing=len(pools_to_fetch) <= 50,
                 )
 
             profile_resolver = ProfileTypeResolver(cfg, client=client)
-            vs_extra_map = None
-            skip_vs_extra = False
-            if len(matched_vs) > 50:
-                vs_extra_map = await fetch_vs_extras_bulk(
+            # Always use bulk VS extra fetch to avoid per-VS REST calls with
+            # include_tls=True (which triggers additional TLS-profile resolution
+            # requests for every client-ssl profile and is the main latency driver).
+            vs_extra_task = None
+            skip_vs_extra = True
+            if matched_vs:
+                vs_extra_task = fetch_vs_extras_bulk(
                     cfg,
                     matched_vs_key_set,
                     client=client,
                     profile_resolver=profile_resolver,
+                    include_tls=False,
+                    include_profiles=False,
                 )
-                skip_vs_extra = True
+
+            # Gather Stage 2
+            pool_detail_map = {}
+            vs_extra_map = {}
+            if pool_detail_task and vs_extra_task:
+                pool_res, vs_res = await asyncio.gather(
+                    pool_detail_task, vs_extra_task, return_exceptions=True
+                )
+                pool_detail_map = pool_res if not isinstance(pool_res, Exception) else {}
+                vs_extra_map = vs_res if not isinstance(vs_res, Exception) else {}
+            elif pool_detail_task:
+                res = await pool_detail_task
+                pool_detail_map = res if not isinstance(res, Exception) else {}
+            elif vs_extra_task:
+                res = await vs_extra_task
+                vs_extra_map = res if not isinstance(res, Exception) else {}
 
             tasks = [
                 build_vs_result(
@@ -1515,7 +1591,6 @@ async def search_unified(cfg: F5Config, q: str):
             ]
 
             result = await asyncio.gather(*tasks)
-
             elapsed = round(time.time() - t0, 2)
 
             return {
@@ -1527,9 +1602,37 @@ async def search_unified(cfg: F5Config, q: str):
 
     except HTTPException:
         raise
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vs-extra")
+async def get_vs_extra(req: VSExtraRequest):
+    cfg_obj = F5Config(
+        host=req.host,
+        username=req.username,
+        password=req.password,
+        verify_ssl=req.verify_ssl,
+    )
+
+    try:
+        async with httpx.AsyncClient(verify=req.verify_ssl, timeout=20.0) as client:
+            profile_resolver = ProfileTypeResolver(cfg_obj, client=client)
+            rules, profiles = await fetch_vs_extra_rest(
+                cfg_obj,
+                req.partition or "Common",
+                req.vs_name,
+                client=client,
+                profile_resolver=profile_resolver,
+                include_tls=True,
+                include_profiles=True,
+            )
+        return {"ok": True, "rules": rules, "profiles": profiles}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/health")
 async def get_health(cfg: F5Config):
@@ -1558,22 +1661,28 @@ async def get_health(cfg: F5Config):
 async def test_connection(cfg: F5Config):
     try:
         data = await f5_get(cfg, "sys/version")
+        hostname = ""
         version = ""
         for k, v in data.get("entries", {}).items():
             nested = v.get("nestedStats", {}).get("entries", {})
             if "Version" in nested:
                 version = nested["Version"].get("description", "")
                 break
-        return {"ok": True, "version": version, "host": cfg.host}
+        try:
+            settings = await f5_get(cfg, "sys/global-settings")
+            hostname = settings.get("hostname") or ""
+        except Exception:
+            hostname = ""
+        return {"ok": True, "version": version, "host": cfg.host, "hostname": hostname}
     except HTTPException as e:
         return {"ok": False, "error": e.detail}
     except Exception as e:
         if isinstance(e, httpx.TimeoutException):
-            error = "Timeout koneksi ke F5"
+            error = "Connection to F5 timed out"
         elif isinstance(e, httpx.ConnectError):
-            error = "Tidak bisa konek ke F5"
+            error = "Cannot connect to F5"
         else:
-            error = str(e) or e.__class__.__name__ or "Koneksi gagal"
+            error = str(e) or e.__class__.__name__ or "Connection failed"
         return {"ok": False, "error": error}
 
 
@@ -1585,7 +1694,7 @@ async def member_action(req: MemberActionRequest):
         elif req.action == "force-offline":
             payload = {"session": "user-disabled", "state": "user-down"}
         else:
-            raise HTTPException(status_code=400, detail="Action harus 'enable' atau 'force-offline'")
+            raise HTTPException(status_code=400, detail="Action must be 'enable' or 'force-offline'")
 
         cfg_obj = F5Config(host=req.host, username=req.username, password=req.password, verify_ssl=req.verify_ssl)
         headers = get_headers(cfg_obj)
@@ -1605,7 +1714,7 @@ async def member_action(req: MemberActionRequest):
                     continue
                 r.raise_for_status()
                 return {"ok": True, "action": req.action, "member": req.member_name}
-            raise HTTPException(status_code=404, detail=f"Member tidak ditemukan. {last_body[:200]}")
+            raise HTTPException(status_code=404, detail=f"Member not found. {last_body[:200]}")
     except HTTPException:
         raise
     except Exception as e:
@@ -1621,7 +1730,7 @@ async def member_action_bulk(req: BulkMemberActionRequest):
         else:
             raise HTTPException(
                 status_code=400,
-                detail="Action harus 'enable' atau 'force-offline'"
+                detail="Action must be 'enable' or 'force-offline'"
             )
 
         cfg_obj = F5Config(
@@ -1648,7 +1757,7 @@ async def member_action_bulk(req: BulkMemberActionRequest):
                     return {
                         "ok": False,
                         "member": member_name,
-                        "error": "Data pool/member tidak lengkap"
+                        "error": "Incomplete pool/member data"
                     }
 
                 member_encoded = member_name.replace(":", "%3A")
@@ -1729,7 +1838,7 @@ async def vs_action(req: VSActionRequest):
         elif req.action == "disable":
             payload = {"disabled": True}
         else:
-            raise HTTPException(status_code=400, detail="Action harus 'enable' atau 'disable'")
+            raise HTTPException(status_code=400, detail="Action must be 'enable' or 'disable'")
 
         cfg_obj = F5Config(host=req.host, username=req.username, password=req.password, verify_ssl=req.verify_ssl)
         headers = get_headers(cfg_obj)
@@ -1740,7 +1849,7 @@ async def vs_action(req: VSActionRequest):
             if r.status_code == 401:
                 raise HTTPException(status_code=401, detail="Unauthorized")
             if r.status_code == 404:
-                raise HTTPException(status_code=404, detail=f"Virtual Server {req.vs_name} tidak ditemukan")
+                raise HTTPException(status_code=404, detail=f"Virtual Server {req.vs_name} was not found")
             r.raise_for_status()
 
         return {"ok": True, "action": req.action, "vs": req.vs_name}

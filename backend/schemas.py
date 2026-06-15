@@ -1,12 +1,11 @@
 """
-schemas.py — Pydantic schemas untuk request & response API inventory feature.
+Pydantic request and response schemas.
 """
 from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel, field_validator
+from typing import List, Optional
 
+from pydantic import BaseModel
 
-# ─── Device schemas ────────────────────────────────────────────────────────────
 
 class DeviceCreate(BaseModel):
     name: str
@@ -21,7 +20,7 @@ class DeviceUpdate(BaseModel):
     name: Optional[str] = None
     management_ip: Optional[str] = None
     username: Optional[str] = None
-    password: Optional[str] = None          # kosong = jangan overwrite
+    password: Optional[str] = None
     verify_ssl: Optional[bool] = None
     enabled: Optional[bool] = None
 
@@ -53,12 +52,12 @@ class DeviceTopologyConfig(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ─── Inventory schemas ─────────────────────────────────────────────────────────
-
 class InventoryIPOut(BaseModel):
     id: int
+    device_id: Optional[int] = None
     hostname: str
     ip: str
+    port: str = ""
     type: str
     last_seen: datetime
 
@@ -69,8 +68,6 @@ class InventorySearchResult(BaseModel):
     ip: str
     results: List[InventoryIPOut]
 
-
-# ─── Sync schemas ──────────────────────────────────────────────────────────────
 
 class SyncDeviceError(BaseModel):
     device_id: int

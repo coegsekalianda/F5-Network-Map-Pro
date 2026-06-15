@@ -185,7 +185,10 @@ def normalize_f5_vs_stats(raw_stats: dict) -> dict:
 async def list_virtual_servers_for_device(db: AsyncSession, device_id: int) -> dict:
     device = await _device_by_id(db, device_id)
     if not device:
-        return {"device_id": device_id, "items": [], "status": "error", "error": "Device tidak ditemukan"}
+        return {"device_id": device_id, "items": [], "status": "error", "error": "Device not found"}
+
+    # Commit early to release database transaction before slow REST calls
+    await db.commit()
 
     try:
         data = await _f5_get(
@@ -227,7 +230,10 @@ async def get_vs_connection_stats(
 ) -> dict:
     device = await _device_by_id(db, device_id)
     if not device:
-        return _error_result(device_id, "", partition, vs_name, "Device tidak ditemukan")
+        return _error_result(device_id, "", partition, vs_name, "Device not found")
+
+    # Commit early to release database transaction before slow REST calls
+    await db.commit()
 
     hostname = device.get("hostname") or device.get("name") or device.get("management_ip")
     path = f"ltm/virtual/{_f5_object_path(partition, vs_name)}/stats"

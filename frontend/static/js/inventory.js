@@ -1,12 +1,12 @@
 /**
- * inventory.js — Frontend logic untuk halaman Devices & Inventory
- * 
- * Halaman:
- *   - Devices    : CRUD device F5, test connection, sync per device
- *   - Inventory  : Sync All, Search IP, Load All
+ * inventory.js - Frontend logic for Devices & Inventory
+ *
+ * Pages:
+ *   - Devices   : F5 device CRUD, test connection, per-device sync
+ *   - Inventory : Sync All, Search IP, Load All
  */
 
-const INV_API = '';  // relatif ke origin yang sama
+const INV_API = '';  // relative to the same origin
 
 function routeForTab(tab) {
   return tab === 'monitoring' ? '/monitoring' : '/';
@@ -27,63 +27,80 @@ function openMonitoringPage() {
   window.open('/monitoring', '_blank', 'noopener');
 }
 
+function setDisplay(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = value;
+}
+
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
 // ─── Tab Navigation ────────────────────────────────────────────────────────────
 
 function switchTab(tab, options = {}) {
   updateRouteForTab(tab, Boolean(options.replace));
   document.body.classList.toggle('monitoring-standalone', tab === 'monitoring');
 
-  // Sembunyikan semua sidebar panels & pages
-  document.getElementById('sidebar-topology').style.display = 'none';
-  document.getElementById('sidebar-devices').style.display  = 'none';
-  document.getElementById('sidebar-inventory').style.display = 'none';
-  document.getElementById('sidebar-monitoring').style.display = 'none';
+  if (tab === 'monitoring') {
+    document.title = 'F5 Network Map Pro - Monitoring';
+  } else {
+    document.title = 'F5 Network Map Pro';
+  }
 
-  document.getElementById('page-topology').style.display  = 'none';
-  document.getElementById('page-devices').style.display   = 'none';
-  document.getElementById('page-inventory').style.display = 'none';
-  document.getElementById('page-monitoring').style.display = 'none';
+  // Hide all sidebar panels and pages.
+  setDisplay('sidebar-topology', 'none');
+  setDisplay('sidebar-devices', 'none');
+  setDisplay('sidebar-inventory', 'none');
+  setDisplay('sidebar-monitoring', 'none');
 
-  // Reset topbar
+  setDisplay('page-topology', 'none');
+  setDisplay('page-devices', 'none');
+  setDisplay('page-inventory', 'none');
+  setDisplay('page-monitoring', 'none');
+
+  // Reset topbar.
   const topbar = document.getElementById('topbar');
   topbar.style.display = 'flex';
-  document.getElementById('status-msg').textContent = '';
-  document.getElementById('bulk-header-container').style.display = 'none';
+  setText('status-msg', '');
+  setDisplay('bulk-header-container', 'none');
 
-  // Hapus active dari semua tab
+  // Clear active state from all tabs.
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('tab-active'));
   const tabButton = document.getElementById(`tab-${tab}`);
   if (tabButton) tabButton.classList.add('tab-active');
 
   if (tab === 'topology') {
     if (typeof stopMonitoringPolling === 'function') stopMonitoringPolling();
-    document.getElementById('sidebar-topology').style.display = 'block';
-    document.getElementById('page-topology').style.display    = 'flex';
-    document.getElementById('status-msg').textContent = 'Hubungkan ke F5, lalu masukkan IP.';
-    document.getElementById('bulk-header-container').style.display = 'flex';
+    setDisplay('sidebar-topology', 'block');
+    setDisplay('page-topology', 'flex');
+    if (typeof restoreTopologyStatus === 'function') restoreTopologyStatus();
+    else setText('status-msg', 'Connect to F5, then enter an IP.');
+    setDisplay('bulk-header-container', 'flex');
     if (typeof loadTopologyDeviceOptions === 'function') loadTopologyDeviceOptions();
   } else if (tab === 'devices') {
     if (typeof stopMonitoringPolling === 'function') stopMonitoringPolling();
-    document.getElementById('sidebar-devices').style.display = 'block';
-    document.getElementById('page-devices').style.display    = 'block';
-    document.getElementById('status-msg').textContent = 'Device Management';
+    setDisplay('sidebar-devices', 'block');
+    setDisplay('page-devices', 'block');
+    setText('status-msg', 'Device Management');
     loadDevices();
   } else if (tab === 'inventory') {
     if (typeof stopMonitoringPolling === 'function') stopMonitoringPolling();
-    document.getElementById('sidebar-inventory').style.display = 'block';
-    document.getElementById('page-inventory').style.display    = 'block';
-    document.getElementById('status-msg').textContent = 'IP Inventory';
+    setDisplay('sidebar-inventory', 'block');
+    setDisplay('page-inventory', 'block');
+    setText('status-msg', 'IP Inventory');
     loadInventoryDeviceOptions();
   } else if (tab === 'monitoring') {
-    document.getElementById('sidebar-monitoring').style.display = 'block';
-    document.getElementById('page-monitoring').style.display    = 'block';
-    document.getElementById('topbar').style.display = 'none';
-    document.getElementById('status-msg').textContent = 'VS Connection Monitor';
+    setDisplay('sidebar-monitoring', 'block');
+    setDisplay('page-monitoring', 'block');
+    setDisplay('topbar', 'none');
+    setText('status-msg', 'VS Connection Monitor');
     if (typeof initMonitoringPage === 'function') initMonitoringPage();
   }
 }
 
-// ─── Toast (reuse dari app.js) ─────────────────────────────────────────────────
+// Toast helpers reused from app.js.
 function invToast(msg, type) {
   if (typeof toast === 'function') {
     toast(msg, type);
@@ -106,20 +123,48 @@ function fmtDate(iso) {
 }
 
 // ─── Status Badge ──────────────────────────────────────────────────────────────
-function statusBadge(status) {
-  if (!status || status === 'NEVER') return `<span class="badge badge-muted">NEVER</span>`;
-  if (status === 'OK')               return `<span class="badge badge-ok">OK</span>`;
-  if (status === 'FAILED')           return `<span class="badge badge-err">FAILED</span>`;
-  return `<span class="badge badge-muted">${status}</span>`;
+function statusBadge(status, deviceId = '') {
+  const attr = deviceId ? `data-device-status data-device-id="${deviceId}"` : '';
+
+  if (!status || status === 'NEVER') {
+    return `<span ${attr} class="badge badge-muted">NEVER</span>`;
+  }
+
+  if (status === 'OK') {
+    return `<span ${attr} class="badge badge-ok">OK</span>`;
+  }
+
+  if (status === 'FAILED') {
+    return `<span ${attr} class="badge badge-err">FAILED</span>`;
+  }
+
+  if (status === 'SYNCING') {
+    return `<span ${attr} class="badge badge-syncing">SYNCING</span>`;
+  }
+
+  return `<span ${attr} class="badge badge-muted">${escHtml(status)}</span>`;
+}
+
+function updateDeviceStatusBadge(deviceId, status) {
+  _deviceList = _deviceList.map(d => (
+    d.id === deviceId ? { ...d, last_status: status } : d
+  ));
+
+  const el = document.querySelector(`[data-device-status][data-device-id="${deviceId}"]`);
+  if (!el) return;
+
+  const wrap = document.createElement('template');
+  wrap.innerHTML = statusBadge(status, deviceId).trim();
+  el.replaceWith(wrap.content.firstElementChild);
 }
 
 async function openTopologyFromInventory(hostname, ip) {
   if (!hostname) {
-    invToast('Hostname F5 tidak valid', 'err');
+    invToast('Invalid F5 hostname', 'err');
     return;
   }
 
-  invToast(`Muat config ${hostname}...`, '');
+  invToast(`Loading config ${hostname}...`, '');
 
   try {
     const r = await fetch(
@@ -127,7 +172,7 @@ async function openTopologyFromInventory(hostname, ip) {
     );
     const data = await r.json();
     if (!r.ok) {
-      throw new Error(data.detail || 'Device tidak ditemukan');
+      throw new Error(data.detail || 'Device not found');
     }
 
     document.getElementById('inp-host').value = data.management_ip || '';
@@ -135,13 +180,19 @@ async function openTopologyFromInventory(hostname, ip) {
     document.getElementById('inp-pass').value = data.password || '';
     document.getElementById('chk-ssl').checked = Boolean(data.verify_ssl);
     document.getElementById('inp-ip').value = ip || '';
+    if (typeof topologyConnectionLabel !== 'undefined') {
+      topologyConnectionLabel = data.hostname || data.name || hostname;
+    }
 
     switchTab('topology');
-    document.getElementById('conn-status').textContent = `Siap konek ke ${data.name || hostname}`;
-    setStatus(`Config ${data.name || hostname} sudah dimuat. Klik Connect jika ingin login.`, '');
-    invToast(`Config ${data.name || hostname} dimuat`, 'ok');
+    if (typeof testConnection === 'function') {
+      await testConnection();
+    }
+    if (ip && typeof doSearch === 'function') {
+      doSearch();
+    }
   } catch (e) {
-    invToast('Gagal login topology: ' + e.message, 'err');
+    invToast('Failed to login topology: ' + e.message, 'err');
   }
 }
 
@@ -161,14 +212,14 @@ async function loadDevices() {
     _deviceList = data;
     renderDevicesTable(data);
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="inv-empty inv-err">Gagal memuat device: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="inv-empty inv-err">Failed to load devices: ${e.message}</td></tr>`;
   }
 }
 
 function renderDevicesTable(devices) {
   const tbody = document.getElementById('devices-tbody');
   if (!devices || devices.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="inv-empty">Belum ada device. Klik "+ Add Device" untuk menambahkan.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="inv-empty">No devices yet. Click "+ Add Device" to add one.</td></tr>`;
     return;
   }
 
@@ -180,11 +231,11 @@ function renderDevicesTable(devices) {
       </td>
       <td class="inv-td-mono">${escHtml(d.management_ip)}</td>
       <td>${escHtml(d.username)}</td>
-      <td>${statusBadge(d.last_status)}</td>
+      <td>${statusBadge(d.last_status, d.id)}</td>
       <td class="inv-td-date">${fmtDate(d.last_sync)}</td>
       <td class="inv-td-actions">
         <button class="btn btn-sm" onclick="showDeviceForm(${d.id})" title="Edit">Edit</button>
-        <button class="btn btn-sm" onclick="syncDeviceById(${d.id})" title="Sync">Sync</button>
+        <button class="btn btn-sm" data-device-sync data-device-id="${d.id}" onclick="syncDeviceById(${d.id})" title="Sync">Sync</button>
         <button class="btn btn-sm btn-danger-sm" onclick="deleteDevice(${d.id}, '${escHtml(d.name)}')" title="Delete">Del</button>
       </td>
     </tr>
@@ -217,7 +268,7 @@ function showDeviceForm(deviceId) {
     }
     testBtn.style.display = 'inline-block';
   } else {
-    title.textContent = 'Tambah Device Baru';
+    title.textContent = 'Add New Device';
     testBtn.style.display = 'none';
   }
 
@@ -240,18 +291,18 @@ async function saveDevice() {
   const statusEl = document.getElementById('dform-status');
 
   if (!name || !ip || !user) {
-    statusEl.textContent = 'Name, IP, dan Username wajib diisi.';
+    statusEl.textContent = 'Name, IP, and Username are required.';
     statusEl.className = 'dform-status dform-err';
     return;
   }
 
   if (!id && !pass) {
-    statusEl.textContent = 'Password wajib diisi untuk device baru.';
+    statusEl.textContent = 'Password is required for a new device.';
     statusEl.className = 'dform-status dform-err';
     return;
   }
 
-  statusEl.textContent = 'Menyimpan...';
+  statusEl.textContent = 'Saving...';
   statusEl.className = 'dform-status';
 
   const body = { name, management_ip: ip, username: user, verify_ssl: ssl, enabled };
@@ -272,9 +323,9 @@ async function saveDevice() {
       throw new Error(data.detail || JSON.stringify(data));
     }
 
-    statusEl.textContent = id ? 'Device berhasil diupdate!' : 'Device berhasil ditambahkan!';
+    statusEl.textContent = id ? 'Device updated!' : 'Device added!';
     statusEl.className = 'dform-status dform-ok';
-    invToast(id ? 'Device diupdate' : 'Device ditambahkan', 'ok');
+    invToast(id ? 'Device updated' : 'Device added', 'ok');
 
     setTimeout(() => {
       cancelDeviceForm();
@@ -287,19 +338,139 @@ async function saveDevice() {
 }
 
 async function deleteDevice(id, name) {
-  if (!confirm(`Hapus device "${name}"?`)) return;
+  if (!confirm(`Delete device "${name}" and its inventory?`)) return;
 
   try {
     const r = await fetch(`${INV_API}/devices/${id}`, { method: 'DELETE' });
     if (r.status === 204 || r.ok) {
-      invToast(`Device "${name}" dihapus`, 'ok');
+      invToast(`Device "${name}" deleted`, 'ok');
       loadDevices();
     } else {
       const d = await r.json();
-      invToast('Gagal hapus: ' + (d.detail || r.status), 'err');
+      invToast('Delete failed: ' + (d.detail || r.status), 'err');
     }
   } catch (e) {
     invToast('Error: ' + e.message, 'err');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BULK UPDATE PASSWORD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function showBulkPasswordModal() {
+  const modal = document.getElementById('bulk-password-modal');
+  const targetsWrap = document.getElementById('bulk-pwd-targets');
+  const statusEl = document.getElementById('bulk-pwd-status');
+  const input = document.getElementById('bulk-pwd-input');
+
+  // Reset state
+  input.value = '';
+  input.type = 'password';
+  statusEl.textContent = '';
+  statusEl.className = 'dform-status';
+
+  // Render device checkboxes
+  if (_deviceList.length === 0) {
+    targetsWrap.innerHTML = '<div class="bulk-modal-no-device">No devices yet. Add a device first.</div>';
+  } else {
+    targetsWrap.innerHTML = `
+      <div class="bulk-modal-targets-label">Select devices to update:</div>
+      <div class="bulk-device-list">
+        ${_deviceList.map(d => `
+          <label class="bulk-device-item">
+            <input type="checkbox" class="bulk-dev-chk" value="${d.id}" checked/>
+            <span class="bulk-dev-name">${escHtml(d.name)}</span>
+            <span class="bulk-dev-ip inv-td-mono">${escHtml(d.management_ip)}</span>
+          </label>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  modal.style.display = 'flex';
+  setTimeout(() => input.focus(), 50);
+}
+
+function hideBulkPasswordModal(e) {
+  // Close only when the overlay is clicked.
+  if (e && e.target !== document.getElementById('bulk-password-modal')) return;
+  document.getElementById('bulk-password-modal').style.display = 'none';
+}
+
+function selectAllBulkDevices(checked) {
+  document.querySelectorAll('.bulk-dev-chk').forEach(chk => {
+    chk.checked = checked;
+  });
+}
+
+function toggleBulkPassVis() {
+  const inp = document.getElementById('bulk-pwd-input');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+async function saveBulkPassword() {
+  const password = document.getElementById('bulk-pwd-input').value;
+  const statusEl = document.getElementById('bulk-pwd-status');
+  const saveBtn  = document.getElementById('bulk-pwd-save-btn');
+
+  if (!password) {
+    statusEl.textContent = 'Password cannot be empty.';
+    statusEl.className = 'dform-status dform-err';
+    return;
+  }
+
+  // Collect selected device IDs.
+  const checkedIds = Array.from(document.querySelectorAll('.bulk-dev-chk:checked'))
+    .map(chk => parseInt(chk.value, 10));
+
+  if (checkedIds.length === 0) {
+    statusEl.textContent = 'Select at least one device.';
+    statusEl.className = 'dform-status dform-err';
+    return;
+  }
+
+  const totalDevices = _deviceList.length;
+  const isAll = checkedIds.length === totalDevices;
+  const confirmMsg = isAll
+    ? `Update password for ALL ${totalDevices} devices?`
+    : `Update password for ${checkedIds.length} selected devices?`;
+
+  if (!confirm(confirmMsg)) return;
+
+  statusEl.textContent = 'Saving...';
+  statusEl.className = 'dform-status';
+  saveBtn.disabled = true;
+
+  try {
+    const body = { password };
+    // Send device_ids only when not all devices are selected.
+    if (!isAll) body.device_ids = checkedIds;
+
+    const r = await fetch(`${INV_API}/devices/bulk-update-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+
+    if (!r.ok) {
+      throw new Error(data.detail || JSON.stringify(data));
+    }
+
+    statusEl.textContent = `Password updated on ${data.updated} devices!`;
+    statusEl.className = 'dform-status dform-ok';
+    invToast(`Password updated on ${data.updated} devices`, 'ok');
+
+    setTimeout(() => {
+      document.getElementById('bulk-password-modal').style.display = 'none';
+      loadDevices();
+    }, 1200);
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'dform-status dform-err';
+  } finally {
+    saveBtn.disabled = false;
   }
 }
 
@@ -316,12 +487,26 @@ async function testDeviceFormConnection() {
 
   try {
     const r = await fetch(`${INV_API}/devices/${id}/test-connection`, { method: 'POST' });
-    const data = await r.json();
-    if (data.ok) {
+    const data = await r.json().catch(() => null);
+    if (r.ok && data && data.ok) {
       statusEl.textContent = `✓ Connected — ${data.version || data.host}`;
       statusEl.className = 'dform-status dform-ok';
     } else {
-      statusEl.textContent = `✗ ${data.error}`;
+      let errMsg = 'Connection failed';
+      if (data) {
+        if (data.error) {
+          errMsg = data.error;
+        } else if (data.detail) {
+          if (Array.isArray(data.detail)) {
+            errMsg = data.detail.map(err => err.msg || JSON.stringify(err)).join(', ');
+          } else {
+            errMsg = data.detail;
+          }
+        }
+      } else if (!r.ok) {
+        errMsg = `HTTP ${r.status}`;
+      }
+      statusEl.textContent = `✗ ${errMsg}`;
       statusEl.className = 'dform-status dform-err';
     }
   } catch (e) {
@@ -335,24 +520,49 @@ async function testDeviceFormConnection() {
 async function syncDeviceById(id) {
   const d = _deviceList.find(x => x.id === id);
   const name = d ? d.name : `ID ${id}`;
+  const btn = document.querySelector(`[data-device-sync][data-device-id="${id}"]`);
 
   invToast(`Syncing ${name}...`, '');
+  updateDeviceStatusBadge(id, 'SYNCING');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Syncing...';
+  }
 
   try {
     const r = await fetch(`${INV_API}/sync/device/${id}`, { method: 'POST' });
-    const data = await r.json();
+    const data = await r.json().catch(() => null);
 
-    if (data.status === 'OK') {
+    if (r.ok && data && data.status === 'OK') {
       invToast(
         `✓ ${name}: ${data.vs_ip_synced} Virtual Server, ${data.pool_member_ip_synced || data.node_ip_synced || 0} Pool Member, ${data.self_ip_synced || 0} Self IP, ${data.forwarding_vs_skipped} fwd skipped`,
         'ok'
       );
     } else {
-      invToast(`✗ ${name}: ${data.error || 'FAILED'}`, 'err');
+      let errMsg = 'FAILED';
+      if (data) {
+        if (data.error) {
+          errMsg = data.error;
+        } else if (data.detail) {
+          if (Array.isArray(data.detail)) {
+            errMsg = data.detail.map(err => err.msg || JSON.stringify(err)).join(', ');
+          } else {
+            errMsg = data.detail;
+          }
+        }
+      } else if (!r.ok) {
+        errMsg = `HTTP ${r.status}`;
+      }
+      invToast(`✗ ${name}: ${errMsg}`, 'err');
     }
-    loadDevices();
   } catch (e) {
     invToast('Sync error: ' + e.message, 'err');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Sync';
+    }
+    loadDevices();
   }
 }
 
@@ -363,22 +573,59 @@ async function syncDeviceById(id) {
 async function syncAll() {
   const btn = document.getElementById('btn-sync-all');
   if (!btn) return;
+
+  const startTime = performance.now();
+  let timer = null;
+
   btn.disabled = true;
-  btn.textContent = '⟳ Syncing...';
+
+  // Update device status in memory
+  _deviceList = _deviceList.map(d => ({
+    ...d,
+    last_status: 'SYNCING'
+  }));
+
+  // Update device status badges currently visible in the Devices table.
+  document.querySelectorAll('[data-device-status]').forEach(el => {
+    el.textContent = 'SYNCING';
+    el.className = 'badge badge-syncing';
+  });
+
+  // Show live elapsed time on the Sync All button
+  timer = setInterval(() => {
+    const elapsedSec = ((performance.now() - startTime) / 1000).toFixed(1);
+    btn.textContent = `Syncing... ${elapsedSec}s`;
+  }, 200);
 
   try {
     const r = await fetch(`${INV_API}/sync/all`, { method: 'POST' });
-    const data = await r.json();
+    const data = await r.json().catch(() => null);
+
+    if (!r.ok) {
+      throw new Error(data?.detail || data?.error || `HTTP ${r.status}`);
+    }
+
+    const elapsedSec = ((performance.now() - startTime) / 1000).toFixed(2);
+
     invToast(
-      `Sync selesai: ${data.success}/${data.total_devices} OK - ${data.vs_ip_synced || 0} Virtual Server, ${data.pool_member_ip_synced || data.node_ip_synced || 0} Pool Member, ${data.self_ip_synced || 0} Self IP`,
+      `Sync completed in ${elapsedSec}s: ${data.success}/${data.total_devices} OK`,
       data.failed > 0 ? 'err' : 'ok'
     );
-    loadDevices(); // Refresh status device di tabel management
+
+    await loadDevices();
+
   } catch (e) {
-    invToast('Sync gagal: ' + e.message, 'err');
+    const elapsedSec = ((performance.now() - startTime) / 1000).toFixed(2);
+
+    invToast(`Sync failed after ${elapsedSec}s: ${e.message}`, 'err');
+
+    await loadDevices();
+
   } finally {
+    if (timer) clearInterval(timer);
+
     btn.disabled = false;
-    btn.textContent = '⟳ Sync All';
+    btn.textContent = 'Sync All';
   }
 }
 
@@ -388,14 +635,14 @@ async function syncAll() {
 
 async function searchInventory() {
   const ip = (document.getElementById('inv-search-ip').value || '').trim();
-  if (!ip) { invToast('Masukkan IP terlebih dahulu', 'err'); return; }
+  if (!ip) { invToast('Enter an IP first', 'err'); return; }
 
   const panel = document.getElementById('inv-search-result');
   const label = document.getElementById('inv-search-label');
   const wrap  = document.getElementById('inv-search-table-wrap');
 
   panel.style.display = 'block';
-  label.textContent   = `Mencari "${ip}"...`;
+  label.textContent   = `Searching "${ip}"...`;
   wrap.innerHTML      = '';
 
   try {
@@ -403,23 +650,24 @@ async function searchInventory() {
     const data = await r.json();
 
     if (!data.results || data.results.length === 0) {
-      label.textContent = `IP "${ip}" tidak ditemukan di inventory`;
-      wrap.innerHTML    = '<div class="inv-not-found">Tidak ada data untuk IP ini.</div>';
+      label.textContent = `IP "${ip}" was not found in inventory`;
+      wrap.innerHTML    = '<div class="inv-not-found">No data for this IP.</div>';
       return;
     }
 
-    label.textContent = `Ditemukan ${data.results.length} record untuk IP "${ip}"`;
+    label.textContent = `Found ${data.results.length} records for IP "${ip}"`;
     wrap.innerHTML = `
       <div class="inv-table-wrap">
         <table class="inv-table">
           <thead>
-            <tr><th>Hostname F5</th><th>IP</th><th>Type</th><th>Last Seen</th></tr>
+            <tr><th>Hostname F5</th><th>IP</th><th>Port</th><th>Type</th><th>Last Seen</th></tr>
           </thead>
           <tbody>
             ${data.results.map(r => `
               <tr>
                 <td class="inv-td-name">${inventoryHostLink(r.hostname, r.ip)}</td>
                 <td class="inv-td-mono">${escHtml(r.ip)}</td>
+                <td class="inv-td-mono">${escHtml(r.port || '-')}</td>
                 <td>${typeBadge(r.type)}</td>
                 <td class="inv-td-date">${fmtDate(r.last_seen)}</td>
               </tr>
@@ -429,7 +677,7 @@ async function searchInventory() {
       </div>
     `;
   } catch (e) {
-    label.textContent = 'Error saat search';
+    label.textContent = 'Search error';
     wrap.innerHTML = `<div class="inv-err">${escHtml(e.message)}</div>`;
   }
 }
@@ -463,8 +711,8 @@ async function loadInventoryDeviceOptions() {
     }
     if (deviceInput) deviceInput.placeholder = 'Hostname...';
   } catch (e) {
-    if (deviceInput) deviceInput.placeholder = 'Gagal memuat hostname';
-    invToast('Gagal memuat list device: ' + e.message, 'err');
+    if (deviceInput) deviceInput.placeholder = 'Failed to load hostnames';
+    invToast('Failed to load device list: ' + e.message, 'err');
   }
 }
 
@@ -486,11 +734,11 @@ function findDeviceByHostnameInput(inputId, allowAll) {
 async function loadInventoryForSelected() {
   const device = findDeviceByHostnameInput('inv-device-select', false);
   if (device === undefined) {
-    invToast('Pilih device terlebih dahulu', 'err');
+    invToast('Select a device first', 'err');
     return;
   }
   if (!device) {
-    invToast('Pilih hostname dari daftar device', 'err');
+    invToast('Select a hostname from the device list', 'err');
     return;
   }
 
@@ -513,7 +761,7 @@ async function loadInventoryForSelected() {
     count.textContent = `${data.length} records`;
 
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="inv-empty">Inventory kosong untuk device ini. Lakukan Sync terlebih dahulu.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="inv-empty">Inventory is empty for this device. Run Sync first.</td></tr>';
       return;
     }
 
@@ -522,6 +770,7 @@ async function loadInventoryForSelected() {
         <td class="inv-td-num">${i + 1}</td>
         <td class="inv-td-name">${inventoryHostLink(item.hostname, item.ip)}</td>
         <td class="inv-td-mono">${escHtml(item.ip)}</td>
+        <td class="inv-td-mono">${escHtml(item.port || '-')}</td>
         <td>${typeBadge(item.type)}</td>
         <td class="inv-td-date">${fmtDate(item.last_seen)}</td>
       </tr>
@@ -536,7 +785,7 @@ function exportInventory() {
   const params = new URLSearchParams();
 
   if (device === undefined) {
-    invToast('Pilih device terlebih dahulu', 'err');
+    invToast('Select a device first', 'err');
     return;
   }
 
@@ -545,7 +794,7 @@ function exportInventory() {
   }
 
   const suffix = params.toString() ? `?${params.toString()}` : '';
-  const scope = device ? device.hostname : 'semua device';
+  const scope = device ? device.hostname : 'all devices';
 
   invToast(`Export XLSX ${scope}...`, '');
   window.location.href = `${INV_API}/inventory/export.xlsx${suffix}`;
@@ -554,45 +803,45 @@ function exportInventory() {
 async function clearInventoryForSelected() {
   const device = findDeviceByHostnameInput('inv-device-select', false);
   if (device === undefined) {
-    invToast('Pilih device terlebih dahulu', 'err');
+    invToast('Select a device first', 'err');
     return;
   }
   if (!device) {
-    invToast('Pilih hostname dari daftar device', 'err');
+    invToast('Select a hostname from the device list', 'err');
     return;
   }
 
   const deviceId = device.id;
   const deviceName = device.hostname;
 
-  if (!confirm(`Yakin ingin menghapus data inventory untuk device "${deviceName}"? Aksi ini tidak bisa dibatalkan.`)) return;
+  if (!confirm(`Delete inventory data for device "${deviceName}"? This cannot be undone.`)) return;
 
   try {
     const r = await fetch(`${INV_API}/inventory/clear?device_id=${deviceId}`, { method: 'DELETE' });
     const data = await r.json();
     if (!r.ok) {
-      throw new Error(data.detail || 'Gagal hapus');
+      throw new Error(data.detail || 'Delete failed');
     }
-    invToast(data.message || 'Inventory device berhasil dikosongkan', 'ok');
+    invToast(data.message || 'Device inventory cleared', 'ok');
     document.getElementById('inv-all-wrap').style.display = 'none';
     document.getElementById('inv-all-tbody').innerHTML = '';
     document.getElementById('inv-all-count').textContent = '';
   } catch (e) {
-    invToast('Gagal hapus inventory: ' + e.message, 'err');
+    invToast('Failed to clear inventory: ' + e.message, 'err');
   }
 }
 
 async function clearAllInventory() {
-  if (!confirm('Yakin ingin menghapus semua data inventory? Aksi ini tidak bisa dibatalkan.')) return;
+  if (!confirm('Delete all inventory data? This cannot be undone.')) return;
 
   try {
     const r = await fetch(`${INV_API}/inventory/clear`, { method: 'DELETE' });
     const data = await r.json();
     if (!r.ok) {
-      throw new Error(data.detail || 'Gagal hapus');
+      throw new Error(data.detail || 'Delete failed');
     }
 
-    invToast(data.message || 'Semua inventory berhasil dikosongkan', 'ok');
+    invToast(data.message || 'All inventory cleared', 'ok');
     document.getElementById('inv-search-result').style.display = 'none';
     document.getElementById('inv-search-label').textContent = '';
     document.getElementById('inv-search-table-wrap').innerHTML = '';
@@ -600,7 +849,7 @@ async function clearAllInventory() {
     document.getElementById('inv-all-tbody').innerHTML = '';
     document.getElementById('inv-all-count').textContent = '';
   } catch (e) {
-    invToast('Gagal hapus semua inventory: ' + e.message, 'err');
+    invToast('Failed to clear all inventory: ' + e.message, 'err');
   }
 }
 
@@ -620,15 +869,25 @@ function escAttr(str) {
 }
 
 function inventoryHostLink(hostname, ip) {
+  const url = `/?hostname=${encodeURIComponent(hostname)}${ip ? '&ip=' + encodeURIComponent(ip) : ''}`;
   return `
-    <button
-      type="button"
-      class="inv-host-link"
-      data-hostname="${escAttr(hostname)}"
-      data-ip="${escAttr(ip)}"
-      onclick="openTopologyFromInventory(this.dataset.hostname, this.dataset.ip)"
-      title="Muat config ke Topology"
-    >${escHtml(hostname)}</button>
+    <div class="inv-host-link-wrapper" style="display: inline-flex; align-items: center; gap: 6px; max-width: 100%;">
+      <a
+        href="${url}"
+        class="inv-host-link"
+        onclick="event.preventDefault(); openTopologyFromInventory('${escAttr(hostname)}', '${escAttr(ip)}')"
+        title="Load in Topology in this tab"
+      >${escHtml(hostname)}</a>
+      <a
+        href="${url}"
+        target="_blank"
+        class="inv-host-newtab"
+        title="Open in a new tab"
+        onclick="event.stopPropagation();"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: block;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+      </a>
+    </div>
   `;
 }
 
@@ -653,4 +912,14 @@ document.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('popstate', () => {
     switchTab(tabFromRoute(), { replace: true });
   });
+
+  // Parse query parameters
+  const urlParams = new URLSearchParams(window.location.search);
+  const qHostname = urlParams.get('hostname');
+  const qIp = urlParams.get('ip');
+  if (qHostname) {
+    setTimeout(() => {
+      openTopologyFromInventory(qHostname, qIp);
+    }, 200);
+  }
 });

@@ -4,6 +4,10 @@ let selectedMembers = new Map();
 let activeSearchController = null;
 let topologyDevices = [];
 let lastTopologyDeviceValue = '';
+const DEFAULT_TOPOLOGY_STATUS = 'Connect to F5, then enter an IP.';
+let topologyStatusText = DEFAULT_TOPOLOGY_STATUS;
+let topologyStatusType = '';
+let topologyConnectionLabel = '';
 
 const API = '';
 
@@ -23,8 +27,15 @@ function toggleSidebar() {
 // --- UTILS ---
 function setStatus(msg, type) {
   const el = document.getElementById('status-msg');
-  el.textContent = msg;
-  el.style.color = type === 'err' ? '#f44336' : type === 'ok' ? '#4caf50' : '#999';
+  if (!el) return;
+  topologyStatusText = msg || DEFAULT_TOPOLOGY_STATUS;
+  topologyStatusType = type || '';
+  el.textContent = topologyStatusText;
+  el.style.color = topologyStatusType === 'err' ? '#f44336' : topologyStatusType === 'ok' ? '#4caf50' : '#999';
+}
+
+function restoreTopologyStatus() {
+  setStatus(topologyStatusText || DEFAULT_TOPOLOGY_STATUS, topologyStatusType || '');
 }
 
 function toast(msg, type) {
@@ -84,6 +95,16 @@ function findTopologyDevice(value) {
   }) || null;
 }
 
+function topologyDeviceLabelForHost(host) {
+  const q = String(host || '').trim().toLowerCase();
+  if (!q) return '';
+  const device = topologyDevices.find(d => {
+    const candidates = [d.management_ip, d.hostname, d.name].filter(Boolean);
+    return candidates.some(item => String(item).trim().toLowerCase() === q);
+  });
+  return device ? (device.hostname || device.name || device.management_ip || '') : '';
+}
+
 async function handleTopologyDeviceSelected() {
   const input = document.getElementById('inp-host');
   const statusEl = document.getElementById('conn-status');
@@ -106,21 +127,22 @@ async function handleTopologyDeviceSelected() {
     const r = await fetch(`${API}/devices/topology-config/by-hostname/${encodeURIComponent(lookup)}`);
     const data = await r.json();
     if (!r.ok) {
-      throw new Error(data.detail || 'Device tidak ditemukan');
+      throw new Error(data.detail || 'Device not found');
     }
 
     document.getElementById('inp-host').value = data.management_ip || '';
     document.getElementById('inp-user').value = data.username || '';
     document.getElementById('inp-pass').value = data.password || '';
     document.getElementById('chk-ssl').checked = Boolean(data.verify_ssl);
-    setStatus(`Auto login ke ${data.hostname || data.name || data.management_ip}...`, '');
+    topologyConnectionLabel = data.hostname || data.name || data.management_ip || lookup;
+    setStatus(`Auto login to ${topologyConnectionLabel}...`, '');
     await testConnection();
   } catch (e) {
     if (statusEl) {
       statusEl.textContent = 'x ' + e.message;
       statusEl.className = 'conn-status conn-err';
     }
-    toast('Gagal auto login device: ' + e.message, 'err');
+    toast('Failed to auto login device: ' + e.message, 'err');
   }
 }
 
@@ -141,7 +163,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // --- CONNECTION ---
 async function testConnection() {
   const config = getConfig();
-  if (!config.host || !config.password) { toast('Isi host dan password dulu', 'err'); return; }
+  if (!config.host || !config.password) { toast('Enter host and password first', 'err'); return; }
   cfg = config;
   const statusEl = document.getElementById('conn-status');
   statusEl.textContent = 'Connecting...';
@@ -151,41 +173,35 @@ async function testConnection() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     });
-    const data = await r.json().catch(() => ({}));
-    if (data.ok) {
+    const data = await r.json().catch(() => null);
+    if (r.ok && data && data.ok) {
+      const label = data.hostname || topologyConnectionLabel || topologyDeviceLabelForHost(config.host) || data.host || config.host;
+      topologyConnectionLabel = label;
       statusEl.textContent = `OK ${data.version || 'connected'}`;
       statusEl.className = 'conn-status conn-ok';
-      setStatus(`Connected to ${data.host}`, 'ok');
-      loadHealth();
+      setStatus(`Connected to ${label}`, 'ok');
     } else {
-      const error = data.error || data.detail || (r.ok ? 'Koneksi gagal' : `HTTP ${r.status}`);
+      let error = 'Connection failed';
+      if (data) {
+        if (data.error) {
+          error = data.error;
+        } else if (data.detail) {
+          if (Array.isArray(data.detail)) {
+            error = data.detail.map(err => err.msg || JSON.stringify(err)).join(', ');
+          } else {
+            error = data.detail;
+          }
+        }
+      } else if (!r.ok) {
+        error = `HTTP ${r.status}`;
+      }
       statusEl.textContent = 'x ' + error;
       statusEl.className = 'conn-status conn-err';
     }
   } catch (e) {
-    statusEl.textContent = 'x ' + (e.message || 'Koneksi gagal');
+    statusEl.textContent = 'x ' + (e.message || 'Connection failed');
     statusEl.className = 'conn-status conn-err';
   }
-}
-
-async function loadHealth() {
-  try {
-    const r = await fetch(`${API}/api/health`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cfg),
-    });
-    const data = await r.json();
-    if (data.summary) {
-      const s = data.summary;
-      document.getElementById('panel-health').style.display = 'block';
-      document.getElementById('health-grid').innerHTML = `
-        <div class="health-card"><div class="hc-val">${s.totalVS}</div><div class="hc-label">Total Virtual Server</div></div>
-        <div class="health-card hc-up"><div class="hc-val">${s.vsUp}</div><div class="hc-label">Virtual Server Up</div></div>
-        <div class="health-card hc-down"><div class="hc-val">${s.vsDown}</div><div class="hc-label">Virtual Server Down</div></div>
-        <div class="health-card"><div class="hc-val">${s.totalPools}</div><div class="hc-label">Pools</div></div>
-      `;
-    }
-  } catch (e) {}
 }
 
 // --- SEARCH ---
@@ -200,16 +216,16 @@ function cancelSearch() {
     activeSearchController = null;
   }
   setSearchCancelVisible(false);
-  setStatus('Pencarian dibatalkan', 'err');
+  setStatus('Search canceled', 'err');
 }
 
 async function doSearch() {
   const config = getConfig();
   let q = document.getElementById('inp-ip').value.trim();
-  if (!config.host || !config.password) { toast('Hubungkan ke F5 dulu', 'err'); return; }
+  if (!config.host || !config.password) { toast('Connect to F5 first', 'err'); return; }
   cfg = config;
   closePopup();
-  setStatus(q ? `Mencari "${q}"...` : 'Memuat semua Virtual Server...');
+  setStatus(q ? `Searching "${q}"...` : 'Loading all Virtual Servers...');
   clearTree();
 
   if (activeSearchController) activeSearchController.abort();
@@ -231,7 +247,7 @@ async function doSearch() {
     }
     const data = await r.json();
     if (!data.vsList || data.vsList.length === 0) {
-      setStatus(q ? `Tidak ditemukan hasil untuk "${q}"` : 'Tidak ada Virtual Server yang ditemukan', 'err');
+      setStatus(q ? `No results found for "${q}"` : 'No Virtual Servers found', 'err');
       return;
     }
     renderTree(data);
@@ -244,11 +260,11 @@ async function doSearch() {
     const total   = data.vsList.length;
     const pools   = data.vsList.reduce((a, v) => a + v.pools.length, 0);
     const members = data.vsList.reduce((a, v) => a + v.pools.reduce((b, p) => b + p.members.length, 0), 0);
-    const elapsed = data.elapsed ? ` · ${data.elapsed}s` : '';
-    setStatus(`${total} Virtual Server · ${pools} pool · ${members} member${elapsed}`, 'ok');
+    const elapsed = data.elapsed ? ` - ${data.elapsed}s` : '';
+    setStatus(`${total} Virtual Server - ${pools} pool - ${members} member${elapsed}`, 'ok');
   } catch (e) {
     if (e.name === 'AbortError') {
-      setStatus('Pencarian dibatalkan', 'err');
+      setStatus('Search canceled', 'err');
     } else {
       setStatus('Error: ' + e.message, 'err');
     }
@@ -284,11 +300,11 @@ function dotClass(status, noMonitor) {
   if (status === 'node-disabled')
     return 'dot-node-disabled';
 
-  // khusus kondisi semua member force offline
+  // all members are force offline
   if (status === 'all-force-offline')
     return 'dot-down';
 
-  // no monitor normal = biru
+  // no monitor uses neutral status
   if (noMonitor)
     return 'dot-no-monitor';
 
@@ -500,6 +516,119 @@ function tlsBadgeClass(ver) {
   return 'tls-badge-danger'; // TLS 1.0 or SSL
 }
 
+function profileTlsHtml(profiles) {
+  const tlsVersions = [];
+  (profiles || []).forEach(p => {
+    if (p.type === 'client-ssl' && p.tls_versions && p.tls_versions.length) {
+      p.tls_versions.forEach(v => { if (!tlsVersions.includes(v)) tlsVersions.push(v); });
+    }
+  });
+
+  if (!tlsVersions.length) return '';
+
+  return `
+    <div class="tls-dropdown-container">
+      <button class="tls-dropdown-trigger" onclick="toggleTlsDropdown(event, this)">
+        <span>TLS Versions Used (${tlsVersions.length})</span>
+        <span class="tls-dropdown-arrow">▼</span>
+      </button>
+      <div class="tls-dropdown-content" style="display: none;">
+        <div class="tls-badges">
+          ${tlsVersions.map(v => `<span class="tls-badge ${tlsBadgeClass(v)}">${v}</span>`).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function profileRowsHtml(profiles) {
+  if (!profiles || !profiles.length) {
+    return `
+      <div class="profile-table">
+        <div class="profile-row">
+          <div class="profile-type">-</div>
+          <div class="profile-name">No profiles</div>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="profile-table">
+      ${profiles.map(p => `
+        <div class="profile-row">
+          <div class="profile-type">${p.type || 'unknown'}</div>
+          <div class="profile-name">${p.name || '-'}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderVsProfiles(popup, profiles, errorMessage) {
+  const section = popup.querySelector('[data-vs-profile-section]');
+  if (!section) return;
+
+  if (errorMessage) {
+    section.innerHTML = `
+      <div class="profile-title">Profiles</div>
+      <div class="profile-table">
+        <div class="profile-row">
+          <div class="profile-type">error</div>
+          <div class="profile-name dp-warn">${errorMessage}</div>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  section.innerHTML = `
+    ${profileTlsHtml(profiles)}
+    <div class="profile-title">Profiles</div>
+    ${profileRowsHtml(profiles)}
+  `;
+}
+
+async function loadVsProfiles(popup, vsData) {
+  if (!popup || !vsData || !vsData.name) return;
+
+  if (vsData._profilesLoaded) {
+    renderVsProfiles(popup, vsData._profiles || []);
+    return;
+  }
+
+  try {
+    const r = await fetch(`${API}/api/vs-extra`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: cfg.host,
+        username: cfg.username,
+        password: cfg.password,
+        verify_ssl: cfg.verify_ssl,
+        partition: vsData.partition || 'Common',
+        vs_name: vsData.name,
+      }),
+    });
+    const data = await r.json().catch(() => null);
+    if (!r.ok || !data || data.ok === false) {
+      throw new Error((data && (data.detail || data.error)) || `HTTP ${r.status}`);
+    }
+
+    vsData.rules = data.rules || vsData.rules || [];
+    vsData._profiles = data.profiles || [];
+    vsData._profilesLoaded = true;
+
+    if (activePopup === popup) {
+      renderVsProfiles(popup, vsData._profiles);
+    }
+  } catch (err) {
+    if (activePopup === popup) {
+      renderVsProfiles(popup, [], 'Failed to load profile/TLS: ' + err.message);
+    }
+  }
+}
+
 function toggleTlsDropdown(e, btn) {
   e.preventDefault();
   e.stopPropagation();
@@ -533,6 +662,7 @@ function showPopup(e, type, data) {
     const dest = data.destination.replace(/^\/Common\//, '');
     html += dpRow('Destination', dest);
     if (data.snat) html += dpRow('SNAT', data.snat);
+    data.profiles = [];
     if (data.profiles && data.profiles.length) {
       // Collect all TLS versions from client-ssl profiles
       const tlsVersions = [];
@@ -572,6 +702,17 @@ function showPopup(e, type, data) {
         </div>
       `;
     }
+    html += `
+      <div class="profile-section" data-vs-profile-section>
+        <div class="profile-title">Profiles</div>
+        <div class="profile-table">
+          <div class="profile-row">
+            <div class="profile-type">loading</div>
+            <div class="profile-name">Load profile/TLS...</div>
+          </div>
+        </div>
+      </div>
+    `;
     html += `<div class="dp-actions">`;
     if (vsEnabled) {
       html += `<button class="dp-btn dp-btn-force" onclick="vsAction('disable', event)">Disable Virtual Server</button>`;
@@ -591,18 +732,13 @@ function showPopup(e, type, data) {
     html += `
       <div class="dp-row">
         <span class="dp-label">Current Connections</span>
-        <span class="dp-val" data-pool-connections>${data.current_connections !== undefined ? data.current_connections : '-'}</span>
+        <span class="dp-val" data-pool-connections>checking...</span>
       </div>
     `;
     if (data.monitor) html += dpRow('Monitor', data.monitor.replace(/^\/Common\//, ''));
-    else html += dpRow('Monitor', '<span class="dp-warn">Tidak ada monitor</span>');
+    else html += dpRow('Monitor', '<span class="dp-warn">No monitor</span>');
     popup.dataset.pool = data.name || '';
     popup.dataset.partition = data.partition || 'Common';
-    html += `
-      <div class="dp-actions">
-        <button class="dp-btn dp-btn-clear" onclick="clearPoolConnections(event)">Clear Connections</button>
-      </div>
-    `;
 
   } else if (type === 'member') {
     const isForceOffline = data.state === 'force-offline';
@@ -636,6 +772,7 @@ function showPopup(e, type, data) {
   popup.style.opacity = '0';
   document.body.appendChild(popup);
   activePopup = popup;
+  if (type === 'vs') loadVsProfiles(popup, data);
   if (type === 'pool') refreshPoolConnections(popup);
 
   // Position at cursor, then adjust if out of viewport
@@ -706,7 +843,7 @@ async function bulkMemberAction(action) {
   const members = Array.from(selectedMembers.values());
 
   if (!members.length) {
-    toast('Pilih pool member dulu', 'err');
+    toast('Select pool members first', 'err');
     return;
   }
 
@@ -745,7 +882,7 @@ async function bulkMemberAction(action) {
       doSearch();
 
     } else {
-      toast('Gagal: ' + (data.detail || data.error || 'Unknown'), 'err');
+      toast('Failed: ' + (data.detail || data.error || 'Unknown'), 'err');
     }
 
   } catch (err) {
@@ -758,7 +895,7 @@ async function vsAction(action, e) {
   if (!activePopup) return;
   const vsName = activePopup.dataset.vsName;
   const partition = activePopup.dataset.vsPartition;
-  if (!vsName) { toast('Data Virtual Server tidak lengkap', 'err'); return; }
+  if (!vsName) { toast('Incomplete Virtual Server data', 'err'); return; }
 
   const btn = e.target;
   btn.disabled = true;
@@ -779,7 +916,7 @@ async function vsAction(action, e) {
       closePopup();
       doSearch();
     } else {
-      toast('Gagal: ' + (data.detail || data.error || 'Unknown'), 'err');
+      toast('Failed: ' + (data.detail || data.error || 'Unknown'), 'err');
       btn.disabled = false;
       btn.textContent = action === 'enable' ? 'Enable Virtual Server' : 'Disable Virtual Server';
     }
@@ -796,7 +933,7 @@ async function memberAction(action, e) {
   const pool = activePopup.dataset.pool;
   const partition = activePopup.dataset.partition;
   const member = activePopup.dataset.member;
-  if (!pool || !member) { toast('Data pool/member tidak lengkap', 'err'); return; }
+  if (!pool || !member) { toast('Incomplete pool/member data', 'err'); return; }
 
   const btn = e.target;
   btn.disabled = true;
@@ -817,7 +954,7 @@ async function memberAction(action, e) {
       closePopup();
       doSearch();
     } else {
-      toast('Gagal: ' + (data.detail || data.error || 'Unknown'), 'err');
+      toast('Failed: ' + (data.detail || data.error || 'Unknown'), 'err');
       btn.disabled = false;
       btn.textContent = action === 'enable' ? 'Enable' : 'Force Offline';
     }
@@ -825,49 +962,6 @@ async function memberAction(action, e) {
     toast('Error: ' + err.message, 'err');
     btn.disabled = false;
     btn.textContent = action === 'enable' ? 'Enable' : 'Force Offline';
-  }
-}
-
-async function clearPoolConnections(e) {
-  e.stopPropagation();
-  if (!activePopup) return;
-  const pool = activePopup.dataset.pool;
-  const partition = activePopup.dataset.partition;
-  if (!pool) { toast('Pool data missing', 'err'); return; }
-  if (!confirm(`Clear active connections for pool ${pool}?`)) return;
-
-  const btn = e.target;
-  btn.disabled = true;
-  btn.textContent = 'Clearing...';
-
-  try {
-    const r = await fetch(`${API}/api/clear-pool-connections`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        host: cfg.host,
-        username: cfg.username,
-        password: cfg.password,
-        verify_ssl: cfg.verify_ssl,
-        partition,
-        pool_name: pool,
-      }),
-    });
-
-    const data = await r.json();
-    if (r.ok && data.ok) {
-      toast(`Cleared ${data.before} -> ${data.after} connections`, 'ok');
-      closePopup();
-      doSearch();
-    } else {
-      toast('Gagal clear: ' + (data.detail || data.error || `${data.failed || 0} target failed`), 'err');
-      btn.disabled = false;
-      btn.textContent = 'Clear Connections';
-    }
-  } catch (err) {
-    toast('Error: ' + err.message, 'err');
-    btn.disabled = false;
-    btn.textContent = 'Clear Connections';
   }
 }
 
@@ -930,7 +1024,7 @@ function loadScriptOnce(src, globalCheck) {
     script.async = true;
     script.dataset.src = src;
     script.onload = resolve;
-    script.onerror = () => reject(new Error(`Gagal memuat library export: ${src}`));
+    script.onerror = () => reject(new Error(`Failed to load export library: ${src}`));
     document.head.appendChild(script);
   });
 }
@@ -949,7 +1043,7 @@ async function exportPNG() {
   const treeRoot = document.getElementById('tree-root');
 
   if (!treeRoot || !treeRoot.children.length) {
-    toast('Tidak ada data', 'err');
+    toast('No data', 'err');
     return;
   }
 
@@ -1021,7 +1115,7 @@ async function exportPNG() {
     treeContainer.style.height = oldHeight;
     treeContainer.style.maxHeight = oldMaxHeight;
 
-    toast('Export PNG gagal: ' + err.message, 'err');
+    toast('PNG export failed: ' + err.message, 'err');
   });
 }
 
@@ -1030,7 +1124,7 @@ async function exportPDF() {
   const treeRoot = document.getElementById('tree-root');
 
   if (!treeRoot || !treeRoot.children.length) {
-    toast('Tidak ada data', 'err');
+    toast('No data', 'err');
     return;
   }
 
@@ -1144,7 +1238,7 @@ async function exportPDF() {
     treeContainer.style.height = oldHeight;
     treeContainer.style.maxHeight = oldMaxHeight;
 
-    toast('Export PDF gagal: ' + err.message, 'err');
+    toast('PDF export failed: ' + err.message, 'err');
   });
 }
 
