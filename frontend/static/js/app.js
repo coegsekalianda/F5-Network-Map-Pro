@@ -86,6 +86,20 @@ function escAttrLocal(value) {
     .replace(/'/g, '&#39;');
 }
 
+function escHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function ruleDisplayName(rule) {
+  return String(rule || '').split('/').filter(Boolean).pop() || String(rule || '');
+}
+
 function findTopologyDevice(value) {
   const q = String(value || '').trim().toLowerCase();
   if (!q) return null;
@@ -261,7 +275,8 @@ async function doSearch() {
     const pools   = data.vsList.reduce((a, v) => a + v.pools.length, 0);
     const members = data.vsList.reduce((a, v) => a + v.pools.reduce((b, p) => b + p.members.length, 0), 0);
     const elapsed = data.elapsed ? ` - ${data.elapsed}s` : '';
-    setStatus(`${total} Virtual Server - ${pools} pool - ${members} member${elapsed}`, 'ok');
+    const source = data.searchSource === 'topology-cache' ? ' - Cache' : '';
+    setStatus(`${total} Virtual Server - ${pools} pool - ${members} member${elapsed}${source}`, 'ok');
   } catch (e) {
     if (e.name === 'AbortError') {
       setStatus('Search canceled', 'err');
@@ -365,9 +380,16 @@ function renderTree(data) {
 	  ruleWrap.className = 'vs-rules-wrap';
 	
 	  vs.rules.forEach(rule => {
+        const label = ruleDisplayName(rule);
 	    const ruleRow = document.createElement('div');
 	    ruleRow.className = 'tree-node tree-irule';
-	    ruleRow.innerHTML = `<span class="irule-dot"></span><span class="irule-label">${rule}</span>`;
+	    ruleRow.innerHTML = `<span class="irule-dot"></span><span class="irule-label">${escHtml(label)}</span>`;
+        ruleRow.onclick = (e) => showPopup(e, 'rule', {
+          name: label,
+          fullPath: rule,
+          partition: vs.partition || 'Common',
+          vsName: vs.name,
+        });
 	    ruleWrap.appendChild(ruleRow);
 	  });
 	
@@ -646,6 +668,51 @@ function toggleTlsDropdown(e, btn) {
   }
 }
 
+function renderIRuleContent(popup, content, errorMessage) {
+  const contentEl = popup.querySelector('[data-irule-content]');
+  if (!contentEl) return;
+
+  if (errorMessage) {
+    contentEl.textContent = errorMessage;
+    contentEl.classList.add('irule-code-error');
+    return;
+  }
+
+  contentEl.textContent = content || 'No iRule content';
+  contentEl.classList.remove('irule-code-error');
+}
+
+async function loadIRuleContent(popup, ruleData) {
+  if (!popup || !ruleData || !ruleData.name) return;
+
+  try {
+    const r = await fetch(`${API}/api/irule-content`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: cfg.host,
+        username: cfg.username,
+        password: cfg.password,
+        verify_ssl: cfg.verify_ssl,
+        partition: ruleData.partition || 'Common',
+        rule_name: ruleData.fullPath || ruleData.name,
+      }),
+    });
+    const data = await r.json().catch(() => null);
+    if (!r.ok || !data || data.ok === false) {
+      throw new Error((data && (data.detail || data.error)) || `HTTP ${r.status}`);
+    }
+
+    if (activePopup === popup) {
+      renderIRuleContent(popup, data.content || '');
+    }
+  } catch (err) {
+    if (activePopup === popup) {
+      renderIRuleContent(popup, '', 'Failed to load iRule content: ' + err.message);
+    }
+  }
+}
+
 function showPopup(e, type, data) {
   e.stopPropagation();
   closePopup();
@@ -729,12 +796,6 @@ function showPopup(e, type, data) {
     html += `<div class="detail-popup-name">${data.name}</div>`;
     html += dpRow('Members', `${up}/${data.members.length} up`);
     html += dpRow('LB Mode', data.lbMode || 'round-robin');
-    html += `
-      <div class="dp-row">
-        <span class="dp-label">Current Connections</span>
-        <span class="dp-val" data-pool-connections>checking...</span>
-      </div>
-    `;
     if (data.monitor) html += dpRow('Monitor', data.monitor.replace(/^\/Common\//, ''));
     else html += dpRow('Monitor', '<span class="dp-warn">No monitor</span>');
     popup.dataset.pool = data.name || '';
@@ -756,6 +817,16 @@ function showPopup(e, type, data) {
     popup.dataset.pool = data._pool || '';
     popup.dataset.partition = data._partition || '';
     popup.dataset.member = data.name || '';
+
+  } else if (type === 'rule') {
+    html += `<div class="detail-popup-title">iRule</div>`;
+    html += `<div class="detail-popup-name">${escHtml(data.name || data.fullPath || 'iRule')}</div>`;
+    if (data.vsName) html += dpRow('Virtual Server', escHtml(data.vsName));
+    html += `
+      <div class="irule-code-wrap">
+        <pre class="irule-code" data-irule-content>Loading iRule...</pre>
+      </div>
+    `;
   }
 
   popup.innerHTML = html;
@@ -773,7 +844,7 @@ function showPopup(e, type, data) {
   document.body.appendChild(popup);
   activePopup = popup;
   if (type === 'vs') loadVsProfiles(popup, data);
-  if (type === 'pool') refreshPoolConnections(popup);
+  if (type === 'rule') loadIRuleContent(popup, data);
 
   // Position at cursor, then adjust if out of viewport
   const MARGIN = 12;

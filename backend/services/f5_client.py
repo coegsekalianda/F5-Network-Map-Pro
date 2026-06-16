@@ -116,6 +116,17 @@ def extract_ip_from_address(value: str) -> Optional[str]:
     return ip
 
 
+def _pool_ref_parts(pool_ref: str, default_partition: str = "Common") -> tuple[str, str]:
+    if not pool_ref:
+        return default_partition, ""
+    if pool_ref.startswith("/"):
+        parts = pool_ref.strip("/").split("/")
+        if len(parts) >= 2:
+            return parts[0], parts[-1]
+        return default_partition, parts[-1] if parts else ""
+    return default_partition, pool_ref
+
+
 def is_forwarding_virtual(vs: dict) -> bool:
     """Return True when the Virtual Server is Forwarding IP or Forwarding L2."""
     vs_type = str(vs.get("type", "")).lower()
@@ -188,14 +199,14 @@ class F5Client:
             logger.warning(f"[{self.host}] get_hostname failed: {e}. Falling back to management IP.")
             return self.host
 
-    async def get_virtual_server_ip_ports(self, client: httpx.AsyncClient) -> tuple[list[dict], int]:
+    async def get_virtual_server_records(self, client: httpx.AsyncClient) -> tuple[list[dict], int]:
         """
-        Read all Virtual Server IP + port records and skip forwarding-ip records.
+        Read searchable Virtual Server records and skip forwarding-ip records.
         Returns (list_records, forwarding_skipped_count).
         """
         data = await self._get(
             client,
-            "ltm/virtual?$select=name,destination,type,partition,ipForward,l2Forward&$top=5000"
+            "ltm/virtual?$select=name,destination,type,partition,ipForward,l2Forward,pool,enabled,disabled&$top=5000"
         )
 
         records: list[dict] = []
@@ -207,14 +218,45 @@ class F5Client:
                 skipped += 1
                 continue
 
+            name = vs.get("name", "")
+            partition = vs.get("partition", "Common")
             dest = vs.get("destination", "")
             ip, port = extract_ip_port_from_value(dest)
+            key = (partition, name)
+            if not name or key in seen:
+                continue
+
+            seen.add(key)
+            pool_partition, pool_name = _pool_ref_parts(vs.get("pool", ""), partition)
+            records.append({
+                "partition": partition,
+                "vs_name": name,
+                "destination": dest,
+                "ip": ip or "",
+                "port": port,
+                "pool_partition": pool_partition,
+                "pool_name": pool_name,
+                "enabled": bool(vs.get("enabled", False)) and not bool(vs.get("disabled", False)),
+            })
+
+        return records, skipped
+
+    async def get_virtual_server_ip_ports(self, client: httpx.AsyncClient) -> tuple[list[dict], int]:
+        """
+        Read all Virtual Server IP + port records and skip forwarding-ip records.
+        Returns (list_records, forwarding_skipped_count).
+        """
+        records, skipped = await self.get_virtual_server_records(client)
+        seen: set[tuple[str, str]] = set()
+        ip_records = []
+        for record in records:
+            ip = record.get("ip", "")
+            port = record.get("port", "")
             key = (ip, port)
             if ip and key not in seen:
                 seen.add(key)
-                records.append({"ip": ip, "port": port})
-
-        return records, skipped
+                ip_records.append({"ip": ip, "port": port})
+        return ip_records, skipped
 
     async def get_virtual_server_ips(self, client: httpx.AsyncClient) -> tuple[list[str], int]:
         records, skipped = await self.get_virtual_server_ip_ports(client)
@@ -267,11 +309,22 @@ class F5Client:
                 if not ip:
                     ip, parsed_port = extract_ip_port_from_value(member.get("name", ""))
 
-                port = _clean_port(member.get("port")) or parsed_port
+                port_candidate = ""
+                name = member.get("name", "")
+                if ":" in name:
+                    port_candidate = name.rsplit(":", 1)[-1]
+
+                port = _clean_port(member.get("port")) or _clean_port(port_candidate) or parsed_port
                 key = (ip, port)
                 if ip and key not in seen:
                     seen.add(key)
-                    records.append({"ip": ip, "port": port})
+                    records.append({
+                        "ip": ip,
+                        "port": port,
+                        "partition": pool.get("partition", "Common"),
+                        "pool_name": pool.get("name", ""),
+                        "member_name": member.get("name", ""),
+                    })
 
         return records
 
@@ -291,11 +344,11 @@ class F5Client:
 
         sem = asyncio.Semaphore(10)
 
-        async def fetch_members(pool: dict) -> list[dict]:
+        async def fetch_members(pool: dict) -> tuple[str, str, list[dict]]:
             name = pool.get("name", "")
             partition = pool.get("partition", "Common")
             if not name:
-                return []
+                return partition, name, []
 
             pool_name_encoded = name.replace("/", "~")
             path = (
@@ -305,26 +358,37 @@ class F5Client:
             try:
                 async with sem:
                     data = await self._get(client, path)
-                return data.get("items", [])
+                return partition, name, data.get("items", [])
             except Exception as e:
                 logger.warning(f"[{self.host}] get pool members failed for {partition}/{name}: {e}")
-                return []
+                return partition, name, []
 
         member_groups = await asyncio.gather(
             *[fetch_members(pool) for pool in pools_data.get("items", [])]
         )
 
-        for members in member_groups:
+        for pool_partition, pool_name, members in member_groups:
             for member in members:
                 ip, parsed_port = extract_ip_port_from_value(member.get("address", ""))
                 if not ip:
                     ip, parsed_port = extract_ip_port_from_value(member.get("name", ""))
 
-                port = _clean_port(member.get("port")) or parsed_port
+                port_candidate = ""
+                name = member.get("name", "")
+                if ":" in name:
+                    port_candidate = name.rsplit(":", 1)[-1]
+
+                port = _clean_port(member.get("port")) or _clean_port(port_candidate) or parsed_port
                 key = (ip, port)
                 if ip and key not in seen:
                     seen.add(key)
-                    records.append({"ip": ip, "port": port})
+                    records.append({
+                        "ip": ip,
+                        "port": port,
+                        "partition": member.get("partition", pool_partition),
+                        "pool_name": pool_name,
+                        "member_name": member.get("name", ""),
+                    })
 
         return records
 

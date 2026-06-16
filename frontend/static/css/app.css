@@ -537,6 +537,14 @@ input {
   font-size: 12px;
 }
 
+.tree-irule {
+  cursor: pointer;
+}
+
+.tree-irule:hover .irule-label {
+  color: #c9eaff !important;
+}
+
 .dot {
   display: inline-block;
   width: 10px;
@@ -629,6 +637,31 @@ input {
   font-weight: 700;
   line-height: 1.35;
   word-break: break-all;
+}
+
+.irule-code-wrap {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0a0d12;
+  overflow: hidden;
+}
+
+.irule-code {
+  max-height: 340px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  color: #d8dee9;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.irule-code-error {
+  color: #ffb4b1;
 }
 
 .detail-close-btn {
@@ -1801,4 +1834,3 @@ body.monitoring-standalone #page-monitoring {
 .bulk-modal-footer .btn-primary {
   margin-left: auto;
 }
-

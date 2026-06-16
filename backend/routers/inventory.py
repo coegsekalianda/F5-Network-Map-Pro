@@ -40,8 +40,10 @@ def _parse_ip_port_query(value: str) -> tuple[str, Optional[str]]:
     ip, port = value.rsplit(":", 1)
     ip = ip.strip()
     port = port.strip()
-    if not ip or not port:
+    if not ip:
         return value, None
+    if not port:
+        return ip, None
 
     return ip, port
 
@@ -189,32 +191,55 @@ async def _export_scope_name(
 
 @router.get("/search", response_model=InventorySearchResult)
 async def search_inventory(
-    ip: str = Query(..., description="IP address exact match"),
+    ip: str = Query(..., description="IP address search pattern"),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Search IP records in the inventory database using an exact match.
-    This reads only the local database and does not log in to F5.
+    Search IP records in the inventory database.
+    If a colon is present, matches the IP exactly.
+    Otherwise, matches the IP dynamically using a contains (LIKE) query.
     """
-    ip = ip.strip()
-    query_ip, query_port = _parse_ip_port_query(ip)
-    if query_port is not None:
+    ip_raw = ip.strip()
+    has_colon = ":" in ip_raw
+    query_ip, query_port = _parse_ip_port_query(ip_raw)
+
+    if has_colon:
+        if query_port:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM inventory_ip
+                    WHERE ip = :ip
+                      AND port LIKE :port
+                    ORDER BY hostname, type, port
+                    """
+                ),
+                {"ip": query_ip, "port": f"{query_port}%"},
+            )
+        else:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM inventory_ip
+                    WHERE ip = :ip
+                    ORDER BY hostname, type, port
+                    """
+                ),
+                {"ip": query_ip},
+            )
+    else:
         result = await db.execute(
             text(
                 """
                 SELECT *
                 FROM inventory_ip
-                WHERE ip = :ip
-                  AND port = :port
+                WHERE ip LIKE :ip
                 ORDER BY hostname, type, port
                 """
             ),
-            {"ip": query_ip, "port": query_port},
-        )
-    else:
-        result = await db.execute(
-            text("SELECT * FROM inventory_ip WHERE ip = :ip ORDER BY hostname, type, port"),
-            {"ip": query_ip},
+            {"ip": f"%{query_ip}%"},
         )
     rows = result.mappings().all()
     items = [InventoryIPOut.model_validate(dict(row)) for row in rows]

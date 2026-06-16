@@ -22,7 +22,11 @@ from pydantic import BaseModel
 import base64
 import shlex
 from typing import Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
+from sqlalchemy import select, text
+from backend.database import AsyncSessionLocal
+from backend.models import Device
+from backend.services.sync_service import sync_one_device
 
 app = FastAPI(title="F5 Network Map Pro", version="3.0.0")
 
@@ -110,12 +114,23 @@ class VSExtraRequest(BaseModel):
     vs_name: str
 
 
+class IRuleContentRequest(BaseModel):
+    host: str
+    username: str
+    password: str
+    verify_ssl: bool = False
+    partition: str = "Common"
+    rule_name: str
+
+
 def get_headers(cfg: F5Config) -> dict:
     creds = base64.b64encode(f"{cfg.username}:{cfg.password}".encode()).decode()
     return {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
 
 
 F5_SEMAPHORE = asyncio.Semaphore(15)
+_AUTO_SYNC_LOCK = asyncio.Lock()
+_AUTO_SYNC_IN_PROGRESS: set[str] = set()
 
 async def f5_get(cfg: F5Config, path: str, client: httpx.AsyncClient = None) -> dict:
     async with F5_SEMAPHORE:
@@ -747,6 +762,27 @@ async def fetch_pool_details_bulk(
     if not pool_keys:
         return {}
 
+    if fallback_missing and len(pool_keys) <= 50:
+        sem = asyncio.Semaphore(20)
+
+        async def fetch_one(key: str):
+            partition, pool_name = key.split("/", 1)
+            async with sem:
+                return key, await fetch_pool_detail(cfg, pool_name, partition, node_map, client=client)
+
+        results = await asyncio.gather(
+            *[fetch_one(key) for key in pool_keys],
+            return_exceptions=True,
+        )
+        details = {}
+        for item in results:
+            if isinstance(item, Exception):
+                logging.debug(f"Pool detail fetch failed: {item}")
+                continue
+            key, detail = item
+            details[key] = detail
+        return details
+
     pool_data, stats_data = await asyncio.gather(
         f5_get(
             cfg,
@@ -969,6 +1005,47 @@ async def fetch_vs_extras_bulk(
     return extras
 
 
+async def fetch_vs_extras_targeted(
+    cfg: F5Config,
+    vs_keys: set,
+    client: httpx.AsyncClient = None,
+    profile_resolver: ProfileTypeResolver = None,
+    include_tls: bool = True,
+    include_profiles: bool = True,
+) -> dict:
+    if not vs_keys:
+        return {}
+
+    sem = asyncio.Semaphore(12)
+
+    async def fetch_one(key: str):
+        partition, vs_name = key.split("/", 1)
+        async with sem:
+            return key, await fetch_vs_extra_rest(
+                cfg,
+                partition,
+                vs_name,
+                client=client,
+                profile_resolver=profile_resolver,
+                include_tls=include_tls,
+                include_profiles=include_profiles,
+            )
+
+    results = await asyncio.gather(
+        *[fetch_one(key) for key in vs_keys],
+        return_exceptions=True,
+    )
+
+    extras = {}
+    for item in results:
+        if isinstance(item, Exception):
+            logging.debug(f"Targeted VS extra lookup failed: {item}")
+            continue
+        key, detail = item
+        extras[key] = detail
+    return extras
+
+
 async def build_vs_result(
     cfg: F5Config,
     vs: dict,
@@ -1026,6 +1103,12 @@ async def build_vs_result(
         rules, profiles = [], []
     else:
         rules, profiles = extra_result
+    if not rules and isinstance(vs.get("rules"), list):
+        rules = [
+            str(rule).split("/")[-1]
+            for rule in vs.get("rules", [])
+            if str(rule).lower() not in ("none", "")
+        ]
 
     # Extract SNAT info from VS
     sat = vs.get("sourceAddressTranslation", {})
@@ -1379,6 +1462,185 @@ async def find_pools_by_member_rest(
 
     return results
 
+
+async def topology_cache_lookup(cfg: F5Config, q: str, ip_q: str, port_q: str | None):
+    async with AsyncSessionLocal() as db:
+        device_res = await db.execute(
+            text(
+                """
+                SELECT id, hostname, last_sync
+                FROM devices
+                WHERE management_ip = :host
+                   OR hostname = :host
+                   OR name = :host
+                LIMIT 1
+                """
+            ),
+            {"host": cfg.host},
+        )
+        device = device_res.mappings().first()
+        if not device or not device["last_sync"]:
+            return set(), set(), False
+
+        params = {
+            "device_id": device["id"],
+            "hostname": device["hostname"] or "",
+            "q_like": f"%{q}%",
+            "ip_exact": ip_q,
+            "ip_like": f"%{ip_q}%",
+            "port_like": f"{port_q or ''}%",
+        }
+
+        count_res = await db.execute(
+            text(
+                """
+                SELECT COUNT(*) AS total
+                FROM topology_vs_cache
+                WHERE device_id = :device_id OR hostname = :hostname
+                """
+            ),
+            params,
+        )
+        if count_res.mappings().first()["total"] == 0:
+            return set(), set(), False
+
+        vs_keys = set()
+        pool_keys = set()
+
+        if _looks_like_ip(q):
+            if port_q:
+                vs_where = "destination_ip = :ip_exact AND destination_port LIKE :port_like"
+                member_where = "address = :ip_exact AND port LIKE :port_like"
+            else:
+                vs_where = "destination_ip LIKE :ip_like"
+                member_where = "address LIKE :ip_like"
+
+            vs_res = await db.execute(
+                text(
+                    f"""
+                    SELECT partition, vs_name, pool_partition, pool_name
+                    FROM topology_vs_cache
+                    WHERE (device_id = :device_id OR hostname = :hostname)
+                      AND {vs_where}
+                    LIMIT 100
+                    """
+                ),
+                params,
+            )
+            for row in vs_res.mappings().all():
+                vs_keys.add(f"{row['partition']}/{row['vs_name']}")
+                if row["pool_name"]:
+                    pool_keys.add(f"{row['pool_partition']}/{row['pool_name']}")
+
+            member_res = await db.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT v.partition, v.vs_name, m.partition AS pool_partition, m.pool_name
+                    FROM topology_member_cache m
+                    JOIN topology_vs_cache v
+                      ON v.hostname = m.hostname
+                     AND v.pool_partition = m.partition
+                     AND v.pool_name = m.pool_name
+                    WHERE (m.device_id = :device_id OR m.hostname = :hostname)
+                      AND {member_where}
+                    LIMIT 100
+                    """
+                ),
+                params,
+            )
+            for row in member_res.mappings().all():
+                vs_keys.add(f"{row['partition']}/{row['vs_name']}")
+                pool_keys.add(f"{row['pool_partition']}/{row['pool_name']}")
+        else:
+            vs_res = await db.execute(
+                text(
+                    """
+                    SELECT partition, vs_name, pool_partition, pool_name
+                    FROM topology_vs_cache
+                    WHERE (device_id = :device_id OR hostname = :hostname)
+                      AND (lower(vs_name) LIKE :q_like OR lower(pool_name) LIKE :q_like)
+                    LIMIT 100
+                    """
+                ),
+                params,
+            )
+            for row in vs_res.mappings().all():
+                vs_keys.add(f"{row['partition']}/{row['vs_name']}")
+                if row["pool_name"]:
+                    pool_keys.add(f"{row['pool_partition']}/{row['pool_name']}")
+
+        return vs_keys, pool_keys, True
+
+
+async def auto_sync_device_for_host(host: str) -> None:
+    host_key = (host or "").strip().lower()
+    if not host_key:
+        return
+
+    async with _AUTO_SYNC_LOCK:
+        if host_key in _AUTO_SYNC_IN_PROGRESS:
+            return
+        _AUTO_SYNC_IN_PROGRESS.add(host_key)
+
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Device).where(
+                    (Device.management_ip == host)
+                    | (Device.hostname == host)
+                    | (Device.name == host)
+                ).limit(1)
+            )
+            device = result.scalars().first()
+            if not device:
+                logging.info(f"Auto-sync skipped: device not found for {host}")
+                return
+
+            logging.info(f"Auto-sync started after topology cache miss: {device.name}")
+            await sync_one_device(db, device)
+            logging.info(f"Auto-sync finished after topology cache miss: {device.name}")
+    except Exception as e:
+        logging.warning(f"Auto-sync after topology cache miss failed for {host}: {e}")
+    finally:
+        async with _AUTO_SYNC_LOCK:
+            _AUTO_SYNC_IN_PROGRESS.discard(host_key)
+
+
+def schedule_auto_sync_after_cache_miss(cfg: F5Config) -> None:
+    try:
+        asyncio.create_task(auto_sync_device_for_host(cfg.host))
+    except RuntimeError as e:
+        logging.warning(f"Unable to schedule auto-sync after topology cache miss: {e}")
+
+
+async def fetch_virtuals_by_keys(
+    cfg: F5Config,
+    vs_keys: set,
+    client: httpx.AsyncClient,
+) -> list[dict]:
+    if not vs_keys:
+        return []
+
+    sem = asyncio.Semaphore(12)
+
+    async def fetch_one(key: str):
+        partition, vs_name = key.split("/", 1)
+        vs_encoded = quote(vs_name.replace("/", "~"), safe="~")
+        async with sem:
+            try:
+                return await f5_get(
+                    cfg,
+                    f"ltm/virtual/~{quote(partition, safe='')}~{vs_encoded}?$select=name,destination,partition,enabled,disabled,pool,rules,description,ipProtocol,sourceAddressTranslation",
+                    client=client,
+                )
+            except Exception as e:
+                logging.debug(f"Cached VS detail fetch failed for {key}: {e}")
+                return None
+
+    results = await asyncio.gather(*[fetch_one(key) for key in vs_keys])
+    return [item for item in results if isinstance(item, dict) and item.get("name")]
+
+
 @app.post("/api/search-unified")
 async def search_unified(cfg: F5Config, q: str):
     t0 = time.time()
@@ -1387,23 +1649,30 @@ async def search_unified(cfg: F5Config, q: str):
         q = q.strip().lower()
         suffix_ip = ":" in q
         ip_q, port_q = _parse_ip_port(q) if _looks_like_ip(q) else (q, None)
+        cache_vs_keys, cache_pool_keys, cache_checked = await topology_cache_lookup(cfg, q, ip_q, port_q)
+        cache_hit = bool(cache_vs_keys)
+        search_source = "topology-cache" if cache_hit else ("cache-miss-f5" if cache_checked else "f5")
 
         async with httpx.AsyncClient(verify=cfg.verify_ssl, timeout=20.0) as client:
-            # Stage 1: Run initial network fetches in parallel
-            vs_task = f5_get(
-                cfg,
-                "ltm/virtual?$select=name,destination,partition,enabled,pool,description,ipProtocol,sourceAddressTranslation&$top=5000",
-                client=client
-            )
-            pool_task = f5_get(
-                cfg,
-                "ltm/pool?$select=name,partition&$top=5000",
-                client=client
-            )
+            # Stage 1: Run initial network fetches in parallel.
+            if cache_hit:
+                vs_task = fetch_virtuals_by_keys(cfg, cache_vs_keys, client=client)
+                pool_task = None
+            else:
+                vs_task = f5_get(
+                    cfg,
+                    "ltm/virtual?$select=name,destination,partition,enabled,pool,rules,description,ipProtocol,sourceAddressTranslation&$top=5000",
+                    client=client
+                )
+                pool_task = f5_get(
+                    cfg,
+                    "ltm/pool?$select=name,partition&$top=5000",
+                    client=client
+                )
             node_task = fetch_node_map(cfg, client=client)
 
             member_task = None
-            if _looks_like_ip(q):
+            if _looks_like_ip(q) and not cache_hit:
                 member_task = find_pools_by_member_tmsh(
                     cfg,
                     ip_q,
@@ -1420,6 +1689,12 @@ async def search_unified(cfg: F5Config, q: str):
                 if isinstance(matches, Exception):
                     logging.warning(f"find_pools_by_member_tmsh failed: {matches}")
                     matches = []
+            elif cache_hit:
+                vs_res, node_res = await asyncio.gather(
+                    vs_task, node_task, return_exceptions=True
+                )
+                pool_res = {"items": []}
+                matches = []
             else:
                 vs_res, pool_res, node_res = await asyncio.gather(
                     vs_task, pool_task, node_task, return_exceptions=True
@@ -1429,7 +1704,7 @@ async def search_unified(cfg: F5Config, q: str):
             # Check core vs_data success
             if isinstance(vs_res, Exception):
                 raise vs_res
-            vs_data = vs_res
+            vs_data = {"items": vs_res} if cache_hit else vs_res
 
             # Check pool_data success
             if isinstance(pool_res, Exception):
@@ -1442,6 +1717,41 @@ async def search_unified(cfg: F5Config, q: str):
             node_map = node_res if not isinstance(node_res, Exception) else {}
 
             all_vs = vs_data.get("items", [])
+            if cache_hit and not all_vs:
+                logging.info("Topology cache had candidates but no VS detail was returned; falling back to full F5 search")
+                cache_hit = False
+                search_source = "database-stale-f5"
+                vs_res, pool_res = await asyncio.gather(
+                    f5_get(
+                        cfg,
+                        "ltm/virtual?$select=name,destination,partition,enabled,pool,rules,description,ipProtocol,sourceAddressTranslation&$top=5000",
+                        client=client,
+                    ),
+                    f5_get(
+                        cfg,
+                        "ltm/pool?$select=name,partition&$top=5000",
+                        client=client,
+                    ),
+                    return_exceptions=True,
+                )
+                if isinstance(vs_res, Exception):
+                    raise vs_res
+                vs_data = vs_res
+                pool_data = pool_res if not isinstance(pool_res, Exception) else {"items": []}
+                all_vs = vs_data.get("items", [])
+                if _looks_like_ip(q):
+                    try:
+                        matches = await find_pools_by_member_tmsh(
+                            cfg,
+                            ip_q,
+                            port_q,
+                            client=client,
+                            suffix_ip=suffix_ip,
+                        )
+                    except Exception as e_tmsh:
+                        logging.warning(f"find_pools_by_member_tmsh failed: {e_tmsh}")
+                        matches = []
+
             matched_vs_keys = set()
             member_pool_keys = set()
             pool_to_vs = {}
@@ -1453,56 +1763,60 @@ async def search_unified(cfg: F5Config, q: str):
                     key = f"{pool_partition}/{pool_name}"
                     pool_to_vs.setdefault(key, []).append(vs)
 
-            # 1. Search by VS name
-            for vs in all_vs:
-                name = vs.get("name", "").lower()
-                if q in name:
-                    matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
-
-            # 2. Search by Pool name
-            all_pools = pool_data.get("items", [])
-            for p in all_pools:
-                pool_name = p.get("name", "").lower()
-                partition = p.get("partition", "Common")
-                if q in pool_name:
-                    pkey = f"{partition}/{pool_name}"
-                    for vs in pool_to_vs.get(pkey, []):
+            if cache_hit:
+                matched_vs_keys.update(cache_vs_keys)
+                member_pool_keys.update(cache_pool_keys)
+            else:
+                # 1. Search by VS name
+                for vs in all_vs:
+                    name = vs.get("name", "").lower()
+                    if q in name:
                         matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
 
-            # 3. Search by IP / Port (if matches IP pattern)
-            if _looks_like_ip(q):
-                for vs in all_vs:
-                    dest = vs.get("destination", "").lower()
-                    clean_dest = dest.split("/")[-1]
-                    dest_ip, dest_port = _parse_ip_port(clean_dest)
-                    dest_ip_clean = dest_ip.split("%", 1)[0] if "%" in dest_ip else dest_ip
-                    ip_match = _ip_matches(ip_q, dest_ip_clean, suffix_only=suffix_ip)
-
-                    if ip_match:
-                        if port_q:
-                            if dest_port and dest_port.startswith(port_q):
-                                matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
-                        else:
+                # 2. Search by Pool name
+                all_pools = pool_data.get("items", [])
+                for p in all_pools:
+                    pool_name = p.get("name", "").lower()
+                    partition = p.get("partition", "Common")
+                    if q in pool_name:
+                        pkey = f"{partition}/{pool_name}"
+                        for vs in pool_to_vs.get(pkey, []):
                             matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
 
-                # Fallback to REST search if TMSH returned no results
-                if not matches:
-                    try:
-                        matches = await find_pools_by_member_rest(
-                            cfg,
-                            ip_q,
-                            port_q,
-                            client=client,
-                            suffix_ip=suffix_ip,
-                        )
-                    except Exception as e_rest:
-                        logging.warning(f"find_pools_by_member_rest failed: {e_rest}")
+                # 3. Search by IP / Port (if matches IP pattern)
+                if _looks_like_ip(q):
+                    for vs in all_vs:
+                        dest = vs.get("destination", "").lower()
+                        clean_dest = dest.split("/")[-1]
+                        dest_ip, dest_port = _parse_ip_port(clean_dest)
+                        dest_ip_clean = dest_ip.split("%", 1)[0] if "%" in dest_ip else dest_ip
+                        ip_match = _ip_matches(ip_q, dest_ip_clean, suffix_only=suffix_ip)
 
-                for m in matches:
-                    pkey = f"{m['partition']}/{m['pool']}"
-                    member_pool_keys.add(pkey)
-                    for vs in pool_to_vs.get(pkey, []):
-                        matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
+                        if ip_match:
+                            if port_q:
+                                if dest_port and dest_port.startswith(port_q):
+                                    matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
+                            else:
+                                matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
+
+                    # Fallback to REST search if TMSH returned no results
+                    if not matches:
+                        try:
+                            matches = await find_pools_by_member_rest(
+                                cfg,
+                                ip_q,
+                                port_q,
+                                client=client,
+                                suffix_ip=suffix_ip,
+                            )
+                        except Exception as e_rest:
+                            logging.warning(f"find_pools_by_member_rest failed: {e_rest}")
+
+                    for m in matches:
+                        pkey = f"{m['partition']}/{m['pool']}"
+                        member_pool_keys.add(pkey)
+                        for vs in pool_to_vs.get(pkey, []):
+                            matched_vs_keys.add(f"{vs.get('partition')}/{vs.get('name')}")
 
             matched_vs = [
                 vs for vs in all_vs
@@ -1515,6 +1829,7 @@ async def search_unified(cfg: F5Config, q: str):
                     "vsList": [],
                     "q": q,
                     "searchType": "unified",
+                    "searchSource": search_source,
                     "elapsed": elapsed
                 }
 
@@ -1545,15 +1860,17 @@ async def search_unified(cfg: F5Config, q: str):
                 )
 
             profile_resolver = ProfileTypeResolver(cfg, client=client)
-            # Always use bulk VS extra fetch to avoid per-VS REST calls with
-            # include_tls=True (which triggers additional TLS-profile resolution
-            # requests for every client-ssl profile and is the main latency driver).
             vs_extra_task = None
             skip_vs_extra = True
-            if matched_vs:
-                vs_extra_task = fetch_vs_extras_bulk(
+            vs_keys_missing_rules = {
+                f"{vs.get('partition')}/{vs.get('name')}"
+                for vs in matched_vs
+                if not isinstance(vs.get("rules"), list)
+            }
+            if vs_keys_missing_rules:
+                vs_extra_task = fetch_vs_extras_targeted(
                     cfg,
-                    matched_vs_key_set,
+                    vs_keys_missing_rules,
                     client=client,
                     profile_resolver=profile_resolver,
                     include_tls=False,
@@ -1592,11 +1909,14 @@ async def search_unified(cfg: F5Config, q: str):
 
             result = await asyncio.gather(*tasks)
             elapsed = round(time.time() - t0, 2)
+            if q and not cache_hit and result:
+                schedule_auto_sync_after_cache_miss(cfg)
 
             return {
                 "vsList": list(result),
                 "q": q,
                 "searchType": "unified",
+                "searchSource": search_source,
                 "elapsed": elapsed
             }
 
@@ -1628,6 +1948,73 @@ async def get_vs_extra(req: VSExtraRequest):
                 include_profiles=True,
             )
         return {"ok": True, "rules": rules, "profiles": profiles}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _rule_ref_parts(rule_ref: str, default_partition: str = "Common") -> tuple[str, str]:
+    rule_ref = (rule_ref or "").strip()
+    if rule_ref.startswith("/"):
+        parts = rule_ref.strip("/").split("/")
+        if len(parts) >= 2:
+            return parts[0] or default_partition, parts[-1]
+    return default_partition or "Common", rule_ref.split("/")[-1]
+
+
+async def fetch_irule_content(
+    cfg: F5Config,
+    partition: str,
+    rule_name: str,
+    client: httpx.AsyncClient = None,
+) -> dict:
+    parsed_partition, parsed_name = _rule_ref_parts(rule_name, partition or "Common")
+    candidates = [(parsed_partition, parsed_name)]
+    if parsed_partition != "Common":
+        candidates.append(("Common", parsed_name))
+
+    for rule_partition, rule_leaf in candidates:
+        if not rule_leaf:
+            continue
+
+        encoded_partition = quote(rule_partition, safe="")
+        encoded_rule = quote(rule_leaf.replace("/", "~"), safe="~")
+        data = await f5_get(
+            cfg,
+            f"ltm/rule/~{encoded_partition}~{encoded_rule}",
+            client=client,
+        )
+        content = data.get("apiAnonymous") if isinstance(data, dict) else None
+        if content is not None:
+            return {
+                "partition": rule_partition,
+                "name": rule_leaf,
+                "fullPath": data.get("fullPath") or f"/{rule_partition}/{rule_leaf}",
+                "content": content,
+            }
+
+    raise HTTPException(status_code=404, detail=f"iRule {rule_name} was not found")
+
+
+@app.post("/api/irule-content")
+async def get_irule_content(req: IRuleContentRequest):
+    cfg_obj = F5Config(
+        host=req.host,
+        username=req.username,
+        password=req.password,
+        verify_ssl=req.verify_ssl,
+    )
+
+    try:
+        async with httpx.AsyncClient(verify=req.verify_ssl, timeout=20.0) as client:
+            rule = await fetch_irule_content(
+                cfg_obj,
+                req.partition or "Common",
+                req.rule_name,
+                client=client,
+            )
+        return {"ok": True, **rule}
     except HTTPException:
         raise
     except Exception as e:

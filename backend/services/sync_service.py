@@ -6,13 +6,11 @@ Sync All flow:
   2. Sync up to SYNC_CONCURRENCY devices at the same time.
   3. For each device:
      a. Decrypt the password.
-     b. Fetch hostname, Virtual Server IPs, Pool Member IPs, and Self IPs.
-     c. Upsert inventory_ip records.
-     d. Update devices.last_sync and devices.last_status.
+     b. Fetch hostname.
+     c. Fetch Virtual Server, Pool Member, and Self IP records in parallel.
+     d. Bulk upsert inventory and topology cache records.
+     e. Update devices.last_sync and devices.last_status.
   4. Return a SyncResult summary.
-
-Upsert:
-  INSERT ... ON CONFLICT(hostname, ip, port, type) DO UPDATE SET last_seen = ...
 """
 import asyncio
 import logging
@@ -36,32 +34,74 @@ SYNC_CONCURRENCY = 5
 _DB_WRITE_LOCK = asyncio.Lock()
 
 
-async def _upsert_ip(
-    db: AsyncSession,
-    device_id: int,
-    hostname: str,
-    ip: str,
-    port: str,
-    ip_type: str,
-) -> None:
-    """Upsert one inventory_ip record using raw SQL for SQLite ON CONFLICT support."""
+async def _bulk_upsert_ip(db: AsyncSession, rows: list[dict]) -> None:
+    if not rows:
+        return
+
     await db.execute(
         text(
             """
-            INSERT INTO inventory_ip (device_id, hostname, ip, port, type, last_seen)
-            VALUES (:device_id, :hostname, :ip, :port, :type, :now)
+            INSERT INTO inventory_ip (device_id, hostname, ip, port, type)
+            VALUES (:device_id, :hostname, :ip, :port, :type)
             ON CONFLICT(hostname, ip, port, type)
-            DO UPDATE SET device_id = :device_id, last_seen = :now
+            DO UPDATE SET device_id = :device_id
             """
         ),
-        {
-            "device_id": device_id,
-            "hostname": hostname,
-            "ip": ip,
-            "port": port or "",
-            "type": ip_type,
-            "now": datetime.now(timezone.utc),
-        },
+        rows,
+    )
+
+
+async def _bulk_upsert_topology_vs(db: AsyncSession, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    await db.execute(
+        text(
+            """
+            INSERT INTO topology_vs_cache (
+                device_id, hostname, partition, vs_name, destination,
+                destination_ip, destination_port, pool_partition, pool_name, enabled
+            )
+            VALUES (
+                :device_id, :hostname, :partition, :vs_name, :destination,
+                :destination_ip, :destination_port, :pool_partition, :pool_name, :enabled
+            )
+            ON CONFLICT(hostname, partition, vs_name)
+            DO UPDATE SET
+                device_id = :device_id,
+                destination = :destination,
+                destination_ip = :destination_ip,
+                destination_port = :destination_port,
+                pool_partition = :pool_partition,
+                pool_name = :pool_name,
+                enabled = :enabled
+            """
+        ),
+        rows,
+    )
+
+
+async def _bulk_upsert_topology_member(db: AsyncSession, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    await db.execute(
+        text(
+            """
+            INSERT INTO topology_member_cache (
+                device_id, hostname, partition, pool_name, member_name, address, port
+            )
+            VALUES (
+                :device_id, :hostname, :partition, :pool_name, :member_name, :address, :port
+            )
+            ON CONFLICT(hostname, partition, pool_name, member_name)
+            DO UPDATE SET
+                device_id = :device_id,
+                address = :address,
+                port = :port
+            """
+        ),
+        rows,
     )
 
 
@@ -101,11 +141,21 @@ async def sync_one_device(
             hostname = await client_obj.get_hostname(http_client)
             result.hostname = hostname
 
-            vs_records, fwd_skipped = await client_obj.get_virtual_server_ip_ports(http_client)
-            result.forwarding_vs_skipped = fwd_skipped
+            vs_task = client_obj.get_virtual_server_records(http_client)
+            pool_member_task = client_obj.get_pool_member_ip_ports(http_client)
+            self_ip_task = client_obj.get_self_ips(http_client)
 
-            pool_member_records = await client_obj.get_pool_member_ip_ports(http_client)
-            self_ips = await client_obj.get_self_ips(http_client)
+            (vs_cache_records, fwd_skipped), pool_member_records, self_ips = await asyncio.gather(
+                vs_task,
+                pool_member_task,
+                self_ip_task,
+            )
+            vs_records = [
+                {"ip": item["ip"], "port": item.get("port", "")}
+                for item in vs_cache_records
+                if item.get("ip")
+            ]
+            result.forwarding_vs_skipped = fwd_skipped
 
         async with _DB_WRITE_LOCK:
             await db.execute(
@@ -118,19 +168,86 @@ async def sync_one_device(
                 ),
                 {"device_id": device.id, "hostname": hostname}
             )
+            await db.execute(
+                text("DELETE FROM topology_vs_cache WHERE device_id = :device_id OR hostname = :hostname"),
+                {"device_id": device.id, "hostname": hostname},
+            )
+            await db.execute(
+                text("DELETE FROM topology_member_cache WHERE device_id = :device_id OR hostname = :hostname"),
+                {"device_id": device.id, "hostname": hostname},
+            )
 
-            for item in vs_records:
-                await _upsert_ip(db, device.id, hostname, item["ip"], item.get("port", ""), "VS")
+            inventory_rows = [
+                {
+                    "device_id": device.id,
+                    "hostname": hostname,
+                    "ip": item["ip"],
+                    "port": item.get("port", "") or "",
+                    "type": "VS",
+                }
+                for item in vs_records
+            ]
             result.vs_ip_synced = len(vs_records)
 
+            topology_vs_rows = [
+                {
+                    "device_id": device.id,
+                    "hostname": hostname,
+                    "partition": item.get("partition") or "Common",
+                    "vs_name": item.get("vs_name") or "",
+                    "destination": item.get("destination") or "",
+                    "destination_ip": item.get("ip") or "",
+                    "destination_port": item.get("port") or "",
+                    "pool_partition": item.get("pool_partition") or "Common",
+                    "pool_name": item.get("pool_name") or "",
+                    "enabled": int(bool(item.get("enabled", True))),
+                }
+                for item in vs_cache_records
+                if item.get("vs_name")
+            ]
+
+            pool_member_inventory_rows = []
+            topology_member_rows = []
             for item in pool_member_records:
-                await _upsert_ip(db, device.id, hostname, item["ip"], item.get("port", ""), "POOL_MEMBER")
+                if not item.get("ip"):
+                    continue
+                pool_member_inventory_rows.append({
+                    "device_id": device.id,
+                    "hostname": hostname,
+                    "ip": item["ip"],
+                    "port": item.get("port", "") or "",
+                    "type": "POOL_MEMBER",
+                })
+                topology_member_rows.append({
+                    "device_id": device.id,
+                    "hostname": hostname,
+                    "partition": item.get("partition") or "Common",
+                    "pool_name": item.get("pool_name") or "",
+                    "member_name": item.get("member_name") or f"{item.get('ip')}:{item.get('port', '')}",
+                    "address": item.get("ip") or "",
+                    "port": item.get("port") or "",
+                })
             result.pool_member_ip_synced = len(pool_member_records)
             result.node_ip_synced = len(pool_member_records)
 
-            for ip in self_ips:
-                await _upsert_ip(db, device.id, hostname, ip, "", "SELF_IP")
+            self_ip_rows = [
+                {
+                    "device_id": device.id,
+                    "hostname": hostname,
+                    "ip": ip,
+                    "port": "",
+                    "type": "SELF_IP",
+                }
+                for ip in self_ips
+            ]
             result.self_ip_synced = len(self_ips)
+
+            inventory_rows.extend(pool_member_inventory_rows)
+            inventory_rows.extend(self_ip_rows)
+
+            await _bulk_upsert_ip(db, inventory_rows)
+            await _bulk_upsert_topology_vs(db, topology_vs_rows)
+            await _bulk_upsert_topology_member(db, topology_member_rows)
 
             await db.commit()
 

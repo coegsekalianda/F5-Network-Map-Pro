@@ -59,7 +59,6 @@ class InventoryIPOut(BaseModel):
     ip: str
     port: str = ""
     type: str
-    last_seen: datetime
 
     model_config = {"from_attributes": True}
 

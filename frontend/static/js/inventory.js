@@ -660,7 +660,7 @@ async function searchInventory() {
       <div class="inv-table-wrap">
         <table class="inv-table">
           <thead>
-            <tr><th>Hostname F5</th><th>IP</th><th>Port</th><th>Type</th><th>Last Seen</th></tr>
+            <tr><th>Hostname F5</th><th>IP</th><th>Port</th><th>Type</th></tr>
           </thead>
           <tbody>
             ${data.results.map(r => `
@@ -669,7 +669,6 @@ async function searchInventory() {
                 <td class="inv-td-mono">${escHtml(r.ip)}</td>
                 <td class="inv-td-mono">${escHtml(r.port || '-')}</td>
                 <td>${typeBadge(r.type)}</td>
-                <td class="inv-td-date">${fmtDate(r.last_seen)}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -772,7 +771,6 @@ async function loadInventoryForSelected() {
         <td class="inv-td-mono">${escHtml(item.ip)}</td>
         <td class="inv-td-mono">${escHtml(item.port || '-')}</td>
         <td>${typeBadge(item.type)}</td>
-        <td class="inv-td-date">${fmtDate(item.last_seen)}</td>
       </tr>
     `).join('');
   } catch (e) {
