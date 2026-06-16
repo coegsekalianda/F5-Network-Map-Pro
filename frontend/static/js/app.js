@@ -38,6 +38,23 @@ function restoreTopologyStatus() {
   setStatus(topologyStatusText || DEFAULT_TOPOLOGY_STATUS, topologyStatusType || '');
 }
 
+function setTopologyState(state, title, detail) {
+  const empty = document.getElementById('tree-empty');
+  const titleEl = document.getElementById('topology-state-title');
+  const detailEl = document.getElementById('topology-state-detail');
+  if (!empty) return;
+
+  empty.className = `tree-empty tree-state-${state || 'idle'}`;
+  empty.style.display = 'flex';
+  if (titleEl) titleEl.textContent = title || 'Topology ready';
+  if (detailEl) detailEl.textContent = detail || 'No topology loaded';
+}
+
+function hideTopologyState() {
+  const empty = document.getElementById('tree-empty');
+  if (empty) empty.style.display = 'none';
+}
+
 function toast(msg, type) {
   const el = document.getElementById('toast');
   el.textContent = msg;
@@ -230,6 +247,7 @@ function cancelSearch() {
     activeSearchController = null;
   }
   setSearchCancelVisible(false);
+  setTopologyState('error', 'Search canceled', 'The last request was stopped');
   setStatus('Search canceled', 'err');
 }
 
@@ -240,7 +258,7 @@ async function doSearch() {
   cfg = config;
   closePopup();
   setStatus(q ? `Searching "${q}"...` : 'Loading all Virtual Servers...');
-  clearTree();
+  clearTree('loading', 'Searching topology', q ? `Query: ${q}` : 'Loading Virtual Servers');
 
   if (activeSearchController) activeSearchController.abort();
   const controller = new AbortController();
@@ -257,11 +275,13 @@ async function doSearch() {
     if (!r.ok) {
       const err = await r.json();
       setStatus('Error: ' + (err.detail || 'Unknown'), 'err');
+      setTopologyState('error', 'Search failed', err.detail || 'F5 returned an error');
       return;
     }
     const data = await r.json();
     if (!data.vsList || data.vsList.length === 0) {
       setStatus(q ? `No results found for "${q}"` : 'No Virtual Servers found', 'err');
+      setTopologyState('empty', 'No results found', q ? `No match for ${q}` : 'No Virtual Servers returned');
       return;
     }
     renderTree(data);
@@ -280,8 +300,10 @@ async function doSearch() {
   } catch (e) {
     if (e.name === 'AbortError') {
       setStatus('Search canceled', 'err');
+      setTopologyState('error', 'Search canceled', 'The last request was stopped');
     } else {
       setStatus('Error: ' + e.message, 'err');
+      setTopologyState('error', 'Search failed', e.message);
     }
   } finally {
     if (activeSearchController === controller) {
@@ -292,10 +314,10 @@ async function doSearch() {
 }
 
 // --- TREE RENDER ---
-function clearTree() {
+function clearTree(state = 'idle', title, detail) {
   selectedMembers.clear();
   document.getElementById('tree-root').innerHTML = '';
-  document.getElementById('tree-empty').style.display = 'flex';
+  setTopologyState(state, title, detail);
 
   // Hide Bulk Mode button and controls when tree is empty
   const btnBulkMode = document.getElementById('btn-bulk-mode');
@@ -337,7 +359,7 @@ function dotClass(status, noMonitor) {
 
 function renderTree(data) {
   const root = document.getElementById('tree-root');
-  document.getElementById('tree-empty').style.display = 'none';
+  hideTopologyState();
   root.innerHTML = '';
 
   data.vsList.forEach(vs => {
@@ -713,9 +735,36 @@ async function loadIRuleContent(popup, ruleData) {
   }
 }
 
+function positionPopupBesideAnchor(popup, anchorEl) {
+  const MARGIN = 12;
+  const GAP = 10;
+  const anchor = anchorEl && anchorEl.getBoundingClientRect ? anchorEl.getBoundingClientRect() : null;
+  const popupWidth = popup.offsetWidth || 360;
+  const popupHeight = popup.offsetHeight || 220;
+
+  let left = MARGIN;
+  let top = MARGIN;
+
+  if (anchor) {
+    left = anchor.right + GAP;
+    top = anchor.top;
+
+    if (left + popupWidth > window.innerWidth - MARGIN) {
+      left = anchor.left - popupWidth - GAP;
+    }
+  }
+
+  left = Math.max(MARGIN, Math.min(left, window.innerWidth - popupWidth - MARGIN));
+  top = Math.max(MARGIN, Math.min(top, window.innerHeight - popupHeight - MARGIN));
+
+  popup.style.left = `${left}px`;
+  popup.style.top = `${top}px`;
+}
+
 function showPopup(e, type, data) {
   e.stopPropagation();
   closePopup();
+  const anchorEl = e.currentTarget || e.target;
 
   const popup = document.createElement('div');
   popup.className = 'detail-popup';
@@ -846,26 +895,10 @@ function showPopup(e, type, data) {
   if (type === 'vs') loadVsProfiles(popup, data);
   if (type === 'rule') loadIRuleContent(popup, data);
 
-  // Position at cursor, then adjust if out of viewport
-  const MARGIN = 12;
-  const pw = popup.offsetWidth || 350;
-  const ph = popup.offsetHeight || 200;
-  let px = e.clientX + MARGIN;
-  let py = e.clientY + MARGIN;
-  if (px + pw > window.innerWidth - MARGIN)  px = e.clientX - pw - MARGIN;
-  if (py + ph > window.innerHeight - MARGIN) py = e.clientY - ph - MARGIN;
-  if (px < MARGIN) px = MARGIN;
-  if (py < MARGIN) py = MARGIN;
-  popup.style.left = px + 'px';
-  popup.style.top  = py + 'px';
+  positionPopupBesideAnchor(popup, anchorEl);
 
-  // Re-check after layout paint (popup height now accurate)
   requestAnimationFrame(() => {
-    const rect = popup.getBoundingClientRect();
-    if (rect.right  > window.innerWidth  - MARGIN) popup.style.left = (e.clientX - rect.width  - MARGIN) + 'px';
-    if (rect.bottom > window.innerHeight - MARGIN) popup.style.top  = (e.clientY - rect.height - MARGIN) + 'px';
-    if (parseFloat(popup.style.left) < MARGIN) popup.style.left = MARGIN + 'px';
-    if (parseFloat(popup.style.top)  < MARGIN) popup.style.top  = MARGIN + 'px';
+    positionPopupBesideAnchor(popup, anchorEl);
     popup.style.opacity = '1';
   });
 

@@ -6,8 +6,10 @@ Web application for F5 BIG-IP topology search, device management, local IP inven
 
 - Topology search by Virtual Server name, Pool name, destination IP, IP:port, Pool Member IP, or Pool Member IP:port.
 - Topology search uses synced SQLite cache to find matching Virtual Servers quickly, then loads live details from F5.
-- Cache misses fall back to live F5 search; when live F5 finds a missed object, the device is synced automatically in the background.
+- Cache misses and stale cache entries fall back to live F5 search and trigger a background device sync when needed.
 - Interactive tree for Virtual Servers, Pools, Pool Members, iRules, status, and connection counts.
+- Premium empty, loading, and error states for Topology search.
+- Anchored glass detail popups that open beside the selected VS, Pool, Pool Member, or iRule row.
 - Virtual Server profile and TLS details are loaded only when the popup is opened.
 - iRule content is loaded only when an iRule row is clicked.
 - Operational actions from the UI:
@@ -137,7 +139,7 @@ http://localhost:8000/monitoring
 7. Click an iRule row to load and view the iRule script in a popup.
 8. Use `Export PNG` or `Export PDF` when needed.
 
-Run `Sync` for a device to warm the Topology cache. Once synced, Topology can use the database to find matching Virtual Server name, Pool name, destination IP/IP:port, and Pool Member IP/IP:port before loading live details from F5. If the cache has no match, Topology falls back to a live F5 search so newly created objects can still be found before the next sync. When live F5 finds a result that was missing from cache, the device is synced automatically in the background.
+Run `Sync` for a device to warm the Topology cache. Once synced, Topology can use the database to find matching Virtual Server name, Pool name, destination IP/IP:port, and Pool Member IP/IP:port before loading live details from F5. If the cache has no match, Topology falls back to a live F5 search so newly created objects can still be found before the next sync. When live F5 finds a result that was missing from cache, or when cache points to Virtual Servers that no longer exist, the device is synced automatically in the background.
 
 ### Devices
 

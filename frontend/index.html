@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>F5 Network Map Pro</title>
 <meta name="description" content="F5 Network Map Pro for BIG-IP topology search, monitoring, and F5 device management."/>
-<link rel="stylesheet" href="/static/css/app.css?v=21"/>
+<link rel="stylesheet" href="/static/css/app.css?v=29"/>
 </head>
 <body>
 <div id="app">
@@ -154,8 +154,14 @@
     <div id="page-topology">
       <div id="tree-container">
         <div id="tree-empty" class="tree-empty">
-          <div class="empty-icon">O</div>
-          <div class="empty-text">Search results will appear here</div>
+          <div class="empty-icon" aria-hidden="true"><span></span></div>
+          <div class="empty-title" id="topology-state-title">Topology ready</div>
+          <div class="empty-text" id="topology-state-detail">No topology loaded</div>
+          <div class="empty-skeleton" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
         </div>
         <div id="tree-root"></div>
       </div>
@@ -288,7 +294,7 @@
   </div>
 
 </div>
-<script src="/static/js/app.js?v=22"></script>
+<script src="/static/js/app.js?v=29"></script>
 <script src="/static/js/inventory.js?v=23"></script>
 <script src="/static/js/monitoring.js?v=14"></script>
 </body>

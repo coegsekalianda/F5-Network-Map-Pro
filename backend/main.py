@@ -1596,21 +1596,21 @@ async def auto_sync_device_for_host(host: str) -> None:
                 logging.info(f"Auto-sync skipped: device not found for {host}")
                 return
 
-            logging.info(f"Auto-sync started after topology cache miss: {device.name}")
+            logging.info(f"Auto-sync started after topology cache refresh request: {device.name}")
             await sync_one_device(db, device)
-            logging.info(f"Auto-sync finished after topology cache miss: {device.name}")
+            logging.info(f"Auto-sync finished after topology cache refresh request: {device.name}")
     except Exception as e:
-        logging.warning(f"Auto-sync after topology cache miss failed for {host}: {e}")
+        logging.warning(f"Auto-sync after topology cache refresh request failed for {host}: {e}")
     finally:
         async with _AUTO_SYNC_LOCK:
             _AUTO_SYNC_IN_PROGRESS.discard(host_key)
 
 
-def schedule_auto_sync_after_cache_miss(cfg: F5Config) -> None:
+def schedule_auto_sync_for_topology_cache_refresh(cfg: F5Config) -> None:
     try:
         asyncio.create_task(auto_sync_device_for_host(cfg.host))
     except RuntimeError as e:
-        logging.warning(f"Unable to schedule auto-sync after topology cache miss: {e}")
+        logging.warning(f"Unable to schedule topology cache refresh sync: {e}")
 
 
 async def fetch_virtuals_by_keys(
@@ -1651,6 +1651,7 @@ async def search_unified(cfg: F5Config, q: str):
         ip_q, port_q = _parse_ip_port(q) if _looks_like_ip(q) else (q, None)
         cache_vs_keys, cache_pool_keys, cache_checked = await topology_cache_lookup(cfg, q, ip_q, port_q)
         cache_hit = bool(cache_vs_keys)
+        auto_sync_stale_cache = False
         search_source = "topology-cache" if cache_hit else ("cache-miss-f5" if cache_checked else "f5")
 
         async with httpx.AsyncClient(verify=cfg.verify_ssl, timeout=20.0) as client:
@@ -1717,6 +1718,19 @@ async def search_unified(cfg: F5Config, q: str):
             node_map = node_res if not isinstance(node_res, Exception) else {}
 
             all_vs = vs_data.get("items", [])
+            if cache_hit:
+                live_vs_keys = {
+                    f"{vs.get('partition')}/{vs.get('name')}"
+                    for vs in all_vs
+                    if vs.get("partition") and vs.get("name")
+                }
+                missing_cache_keys = cache_vs_keys - live_vs_keys
+                if missing_cache_keys:
+                    auto_sync_stale_cache = True
+                    logging.info(
+                        "Topology cache has stale VS candidates; scheduling device sync after search"
+                    )
+
             if cache_hit and not all_vs:
                 logging.info("Topology cache had candidates but no VS detail was returned; falling back to full F5 search")
                 cache_hit = False
@@ -1825,6 +1839,8 @@ async def search_unified(cfg: F5Config, q: str):
 
             if not matched_vs:
                 elapsed = round(time.time() - t0, 2)
+                if q and auto_sync_stale_cache:
+                    schedule_auto_sync_for_topology_cache_refresh(cfg)
                 return {
                     "vsList": [],
                     "q": q,
@@ -1909,8 +1925,8 @@ async def search_unified(cfg: F5Config, q: str):
 
             result = await asyncio.gather(*tasks)
             elapsed = round(time.time() - t0, 2)
-            if q and not cache_hit and result:
-                schedule_auto_sync_after_cache_miss(cfg)
+            if q and result and (not cache_hit or auto_sync_stale_cache):
+                schedule_auto_sync_for_topology_cache_refresh(cfg)
 
             return {
                 "vsList": list(result),
